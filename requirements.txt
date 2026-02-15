@@ -1,0 +1,11 @@
+gitpython
+tree-sitter==0.21.3
+tree-sitter-languages
+typer[all]
+rich
+pytest
+requests
+mcp
+pystray
+Pillow
+pyinstaller

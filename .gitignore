@@ -1,0 +1,11 @@
+./debug_ts.py
+output_graph/
+__pycache__
+.pytest_cache.
+*.db
+.venv/
+.DS_Store
+gdskg-mcp.spec
+build/
+dist/
+*.log

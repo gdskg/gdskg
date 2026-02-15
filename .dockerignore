@@ -1,0 +1,19 @@
+# Ignore everything by default
+*
+
+# Allow the files required for the build context
+!requirements.txt
+!main.py
+!core/
+!analysis/
+!mcp_server/
+!plugins/
+!VERSION
+!Dockerfile
+
+# Specifically ignore common clutter within the allowed directories
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+**/gdskg.db
+**/gdskg_graph/
