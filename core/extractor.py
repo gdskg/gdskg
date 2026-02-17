@@ -1,4 +1,9 @@
+import os
+import sys
+os.environ.setdefault("GIT_PYTHON_GIT_EXECUTABLE", "/usr/bin/git")
+os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
 import git
+
 import re
 import hashlib
 from pathlib import Path
@@ -40,7 +45,10 @@ class GraphExtractor:
         # Iterate commits in topological order
         commits = list(self.repo.iter_commits(topo_order=True, reverse=True)) # Process oldest to newest
         
-        with Progress() as progress:
+        from rich.console import Console
+        stderr_console = Console(file=sys.stderr)
+        
+        with Progress(console=stderr_console) as progress:
             task = progress.add_task("[green]Processing commits...", total=len(commits))
             
             for commit in commits:

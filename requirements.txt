@@ -5,3 +5,7 @@ typer[all]
 rich
 pytest
 requests
+mcp
+pystray
+Pillow
+pyinstaller
