@@ -1,0 +1,6 @@
+gitpython
+tree-sitter==0.23.2
+tree-sitter-languages
+typer[all]
+rich
+pytest
