@@ -1,0 +1,85 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+          
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          # Define executable name
+          EXE_NAME="gdskg-mcp"
+          if [ "${{ matrix.os }}" == "windows-latest" ]; then
+            EXE_NAME="gdskg-mcp.exe"
+          fi
+          
+          # Bundle the application
+          # --noconsole: Hide console window on Windows/macOS
+          # --onefile: Create a single executable
+          # --add-data: Include the icon and server script
+          # --collect-all: Ensure all gdskg modules are included
+          
+          if [ "${{ matrix.os }}" == "windows-latest" ]; then
+            ICON_SEP=";"
+          else
+            ICON_SEP=":"
+          fi
+          
+          pyinstaller --noconsole --onefile \
+            --name "$EXE_NAME" \
+            --add-data "mcp_server/icon.png${ICON_SEP}mcp_server" \
+            --add-data "mcp_server/server.py${ICON_SEP}mcp_server" \
+            --add-data "core${ICON_SEP}core" \
+            --add-data "analysis${ICON_SEP}analysis" \
+            --add-data "plugins${ICON_SEP}plugins" \
+            --hidden-import "mcp.server.fastmcp" \
+            --hidden-import "pystray" \
+            --hidden-import "PIL" \
+            mcp_server/tray.py
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdskg-mcp-${{ matrix.os }}
+          path: dist/*
+          
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            gdskg-mcp-ubuntu-latest/*
+            gdskg-mcp-macos-latest/*
+            gdskg-mcp-windows-latest/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

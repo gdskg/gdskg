@@ -11,7 +11,15 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
-from mcp_server.server import index_folder, query_knowledge_graph
+from mcp_server.server import (
+    index_folder,
+    query_knowledge_graph,
+    start_server,
+    stop_server,
+    get_server_status,
+    _write_server_status,
+    _read_server_status,
+)
 
 @pytest.fixture
 def test_dirs(tmp_path):
@@ -89,3 +97,61 @@ def test_index_with_plugins(test_dirs):
     result = index_folder(str(repo_path), graph_path=str(graph_path), overwrite=True, plugins=["GitHubPR"], parameters=["GitHubPR:key=value"])
     assert "Successfully indexed" in result
     assert "Plugins enabled: 1" in result
+
+
+# --- Server Status Tests ---
+
+@pytest.fixture(autouse=True)
+def reset_server_state():
+    """Ensure the server is in the started state before each test."""
+    _write_server_status(True)
+    yield
+    _write_server_status(True)
+
+
+def test_server_starts_started():
+    """Server should be started by default after import."""
+    assert _read_server_status() is True
+    result = get_server_status()
+    assert "started" in result
+
+
+def test_stop_server_gates_requests(test_dirs):
+    """When server is stopped, tool requests should be rejected."""
+    repo_path, graph_path = test_dirs
+
+    # First index while server is running
+    index_folder(str(repo_path), graph_path=str(graph_path), overwrite=True)
+
+    # Stop the server
+    result = stop_server()
+    assert "stopped" in result.lower()
+
+    # Requests should be rejected
+    q_result = query_knowledge_graph("test", graph_path=str(graph_path))
+    assert "Server is stopped" in q_result
+
+    i_result = index_folder(str(repo_path), graph_path=str(graph_path))
+    assert "Server is stopped" in i_result
+
+
+def test_start_server_resumes_requests(test_dirs):
+    """After stopping and restarting, tool requests should work again."""
+    repo_path, graph_path = test_dirs
+
+    stop_server()
+    start_server()
+
+    result = index_folder(str(repo_path), graph_path=str(graph_path), overwrite=True)
+    assert "Successfully indexed" in result
+
+
+def test_get_server_status():
+    """get_server_status should reflect the current state."""
+    assert "started" in get_server_status()
+
+    stop_server()
+    assert "stopped" in get_server_status()
+
+    start_server()
+    assert "started" in get_server_status()

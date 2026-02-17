@@ -7,6 +7,55 @@ import os
 # Create the MCP server
 mcp = FastMCP("gdskg")
 
+# --- Server Status (file-based, shared between tray app and server process) ---
+# The status file lives at ~/.gdskg/server_status and contains either "started" or "stopped".
+# This allows the tray app to toggle the server state from a separate process.
+_STATUS_DIR = Path.home() / ".gdskg"
+_STATUS_FILE = _STATUS_DIR / "server_status"
+
+
+def _ensure_status_dir():
+    """Create the status directory if it doesn't exist."""
+    _STATUS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _read_server_status() -> bool:
+    """Read the server status from the file. Returns True if started, False if stopped."""
+    try:
+        if _STATUS_FILE.exists():
+            return _STATUS_FILE.read_text().strip() == "started"
+    except Exception:
+        pass
+    return True  # Default to started if file missing or unreadable
+
+
+def _write_server_status(started: bool):
+    """Write the server status to the file."""
+    _ensure_status_dir()
+    _STATUS_FILE.write_text("started" if started else "stopped")
+
+
+def start_server() -> str:
+    """Start the GDSKG server. When started, the server will process incoming tool requests."""
+    _write_server_status(True)
+    return "Server started. Ready to handle requests."
+
+
+def stop_server() -> str:
+    """Stop the GDSKG server. When stopped, the server will reject incoming tool requests."""
+    _write_server_status(False)
+    return "Server stopped. Requests will be rejected until the server is started again."
+
+
+def get_server_status() -> str:
+    """Get the current status of the GDSKG server."""
+    started = _read_server_status()
+    return f"Server is {'started' if started else 'stopped'}."
+
+
+# Auto-set server to started on module load
+_write_server_status(True)
+
 # Helper to get the GDSKG root directory
 def get_project_root() -> Path:
     # Assuming this file is at gdskg/mcp_server/server.py
@@ -22,6 +71,8 @@ sys.path.append(str(PROJECT_ROOT))
 sys.path.append(str(PROJECT_ROOT / "gdskg"))
 
 
+# --- Knowledge Graph Tools ---
+
 @mcp.tool()
 def query_knowledge_graph(query: str, graph_path: str = str(DEFAULT_GRAPH_PATH), limit: int = 10) -> str:
     """
@@ -35,6 +86,9 @@ def query_knowledge_graph(query: str, graph_path: str = str(DEFAULT_GRAPH_PATH),
     Returns:
         A formatted string containing the search results.
     """
+    if not _read_server_status():
+        return "Server is stopped. Please start the server first."
+
     graph_dir = Path(graph_path)
     db_path = graph_dir / "gdskg.db"
     
@@ -111,6 +165,8 @@ def index_folder(
     Returns:
         Success message with node count or error message.
     """
+    if not _read_server_status():
+        return "Server is stopped. Please start the server first."
     repo_path = Path(path).resolve()
     graph_dir = Path(graph_path).resolve()
     
@@ -189,4 +245,6 @@ def index_folder(
         return f"Error indexing folder: {str(e)}"
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     mcp.run()

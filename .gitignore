@@ -5,3 +5,6 @@ __pycache__
 *.db
 .venv/
 .DS_Store
+gdskg-mcp.spec
+build/
+dist/

@@ -100,6 +100,36 @@ Queries the knowledge graph using natural language.
 python -m gdskg.mcp_server.server
 ```
 
+### Tray Icon Application
+
+GDSKG includes a tray icon application that manages the MCP server in the background.
+
+**Features:**
+- Start/Stop the MCP server from the system tray.
+- Cross-platform support (Windows, macOS, Linux).
+- Status indicator in the tray menu.
+
+**Running the Tray App:**
+```bash
+python -m gdskg.mcp_server.tray
+```
+
+### Releases
+
+Standalone executables for the tray application are automatically built on every release tag (`v*`). You can download the latest version for your operating system from the [Releases](https://github.com/your-username/gdskg/releases) page.
+
+### Building Locally
+
+You can build the standalone executable locally using the provided `Makefile`:
+
+```bash
+# Build the executable
+make build
+
+# Clean build artifacts
+make clean
+```
+
 ---
 
 ## Plugins
