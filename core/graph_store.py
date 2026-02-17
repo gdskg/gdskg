@@ -57,6 +57,15 @@ class GraphStore:
             """, (node.id, node.type.value, json.dumps(node.attributes)))
             conn.commit()
 
+    def upsert_symbol(self, id: str, file_path: str):
+        """Helper to upsert a symbol node."""
+        node = Node(
+            id=id, 
+            type=NodeType.SYMBOL, 
+            attributes={"name": id, "file": file_path}
+        )
+        self.upsert_node(node)
+
     def upsert_edge(self, edge: Edge):
         """Insert or update an edge."""
         with sqlite3.connect(self.db_path) as conn:

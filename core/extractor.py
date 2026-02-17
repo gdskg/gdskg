@@ -1,5 +1,6 @@
 import git
 import re
+import hashlib
 from pathlib import Path
 from typing import Optional
 from rich.progress import Progress
@@ -59,6 +60,21 @@ class GraphExtractor:
             }
         )
         self.store.upsert_node(commit_node)
+        
+        # Commit Message Node
+        # ID is a hash of the message to link identical messages
+        msg_id = hashlib.sha256(commit.message.encode()).hexdigest()
+        msg_node = Node(
+            id=f"MSG:{msg_id}",
+            type=NodeType.COMMIT_MESSAGE,
+            attributes={"content": commit.message}
+        )
+        self.store.upsert_node(msg_node)
+        self.store.upsert_edge(Edge(
+            source_id=commit_node.id,
+            target_id=msg_node.id,
+            type=EdgeType.HAS_MESSAGE
+        ))
         
         # Part of Repo Edge
         self.store.upsert_edge(Edge(
@@ -123,32 +139,16 @@ class GraphExtractor:
             # For simplicity in this "Two-Pass" which relies on diff hunks,
             # we can likely treat initial commit files as all "Added".
             # gitpython `commit.diff(git.NULL_TREE)`
+            # We use Reverse=True to diff NULL -> Commit (Additions)
             diffs = commit.diff(git.NULL_TREE, create_patch=True)
-
+        
+        # Note: diffs might be a generator, converting to list consumes it! 
+        # But gitpython diff returns DiffIndex which is a list-like object usually.
+        # But to be safe, let's re-generate or just iterate.
+        # DiffIndex is a list subclass.
+        
         for diff in diffs:
             self._process_diff_item(diff, commit_node)
-
-    def _process_diff_item(self, diff: git.Diff, commit_node: Node):
-        # File path
-        # a_path is source, b_path is target. 
-        file_path = diff.b_path if diff.b_path else diff.a_path
-        if not file_path:
-            return
-
-        file_node = Node(
-            id=file_path,
-            type=NodeType.FILE,
-            attributes={"name": Path(file_path).name, "extension": Path(file_path).suffix}
-        )
-        self.store.upsert_node(file_node)
-        
-        # Modified File Edge
-        self.store.upsert_edge(Edge(
-            source_id=commit_node.id,
-            target_id=file_node.id,
-            type=EdgeType.MODIFIED_FILE,
-            attributes={"change_type": diff.change_type}
-        ))
 
     def _process_diff_item(self, diff: git.Diff, commit_node: Node):
         # File path
@@ -186,69 +186,53 @@ class GraphExtractor:
             content = blob.data_stream.read().decode('utf-8', errors='replace')
             language = TreeSitterUtils.map_extension_to_language(file_node.attributes["extension"])
             
-            # --- Pass 1: Global Symbol Table for this file state ---
-            # Ideally we cache this or use it for resolution.
-            # In this streamlined flow, we extract and ensuring they exist as nodes.
-            # Note: The Spec says "Bind... to create a temporary Symbol Table".
-            # We will extract *definitions* here.
-            
             if language:
-                symbols_pass1 = self.symbol_extractor.extract_symbols(content, language)
-                for name, canonical in symbols_pass1.items():
-                    # Upsert Symbol Node
+                # --- Pass 1a: Extract Definitions (for Node Creation) ---
+                # We only want to create SYMBOL nodes for things defined in this file (Functions, Classes)
+                definitions = self.symbol_extractor.extract_symbols(content, language)
+                for name, canonical in definitions.items():
                     symbol_node = Node(
                         id=canonical,
                         type=NodeType.SYMBOL,
                         attributes={"name": name, "file": file_path}
                     )
                     self.store.upsert_node(symbol_node)
-                    # We could link Symbol -> File here, but spec only asks for Symbol -> Commit
-            
-            # --- Pass 2: Diff Filtering ---
-            # Identify modified lines
-            affected_lines = set()
-            # gitpython diff parsing to find hunk lines
-            # diff.diff is the patch string. We need to parse it.
-            # Simple header parsing: @@ -old,count +new,count @@
-            patch = diff.diff.decode('utf-8', errors='replace') if isinstance(diff.diff, bytes) else diff.diff
-            
-            # We want "new" lines for Added/Modified symbols.
-            # This is a complex parser. Simplification:
-            # Use `diff` object properties if available. GitPython doesn't give line numbers easily.
-            # We must parse the patch header.
-            
-            # Example: @@ -1,5 +1,6 @@
-            current_line = 0
-            for line in patch.splitlines():
-                if line.startswith('@@'):
-                    # Parse header
-                    m = re.search(r'\+(\d+)(?:,(\d+))?', line)
-                    if m:
-                        current_line = int(m.group(1))
-                elif line.startswith('+') and not line.startswith('+++'):
-                    affected_lines.add(current_line)
-                    current_line += 1
-                elif not line.startswith('-'):
-                    current_line += 1
-            
-            if language and affected_lines:
-                modified_symbols = self.symbol_extractor.filter_diff_symbols(content, language, affected_lines)
-                for sym_name in modified_symbols:
-                    # In Pass 2 we get raw identifiers. We should try to resolve to canonical if possible.
-                    # For now, use the identifier as ID (or lookup in symbols_pass1 if exact match)
-                    
-                    canonical = symbols_pass1.get(sym_name, sym_name)
-                    
-                    # Ensure node exists (might have been missed in Pass 1 if it's not a definition but a usage? 
-                    # Spec: "Modified Symbol" - usually implies definition change.
-                    sym_node = Node(id=canonical, type=NodeType.SYMBOL, attributes={"name": sym_name})
-                    self.store.upsert_node(sym_node)
-                    
-                    self.store.upsert_edge(Edge(
-                        source_id=sym_node.id, 
-                        target_id=commit_node.id, 
-                        type=EdgeType.MODIFIED_SYMBOL
-                    ))
+                    # Optional: Edge File -> Symbol (DEFINES)
+                
+                # --- Pass 1b: Build Full Symbol Table (for Resolution) ---
+                # This includes Imports + Definitions to resolve usages in the diff
+                full_symbol_table = self.symbol_extractor.build_symbol_table(content, language)
+                
+                # --- Pass 2: Diff Filtering ---
+                affected_lines = set()
+                # Use diff object for patch
+                patch = diff.diff.decode('utf-8', errors='replace') if isinstance(diff.diff, bytes) else diff.diff
+                
+                # Parse patch for line numbers
+                current_line = 0
+                for line in patch.splitlines():
+                    if line.startswith('@@'):
+                        m = re.search(r'\+(\d+)(?:,(\d+))?', line)
+                        if m:
+                            current_line = int(m.group(1))
+                    elif line.startswith('+') and not line.startswith('+++'):
+                        affected_lines.add(current_line)
+                        current_line += 1
+                    elif not line.startswith('-') and not line.startswith('---'):
+                         current_line += 1
+                
+                if affected_lines:
+                    # Pass full_symbol_table to resolve identifiers in the hunks
+                    modified_symbols = self.symbol_extractor.filter_diff_symbols(content, language, affected_lines, full_symbol_table)
+                    for sym_name in modified_symbols:
+                        self.store.upsert_symbol(sym_name, file_path) # Ensure it exists (if from import? maybe skipping if external?)
+                        # If sym_name comes from 'import os', upsert_symbol creates a node 'os'. 
+                        # This satisfies "connect symbols".
+                        self.store.upsert_edge(Edge(
+                            source_id=sym_name,
+                            target_id=commit_node.id,
+                            type=EdgeType.MODIFIED_SYMBOL 
+                        ))
 
             # --- Secret Scanning ---
             secrets = self.secret_scanner.scan(content)

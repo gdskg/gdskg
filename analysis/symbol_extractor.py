@@ -1,17 +1,132 @@
-from typing import List, Dict, Tuple, Set
+from typing import List, Dict, Tuple, Set, Optional
 from tree_sitter import Node as TSNode
 from analysis.tree_sitter_utils import TreeSitterUtils
 import re
 
 class SymbolExtractor:
     def __init__(self):
-        pass
+        self.definition_types = {
+            "function_definition", 
+            "class_definition", 
+            "method_definition",
+            "lexical_declaration", # For TS 'export const x = ...'
+            "variable_declaration"
+        }
 
-    def extract_symbols(self, file_content: str, language: str) -> Dict[str, str]:
+    def _extract_name(self, node: TSNode, content: str) -> Optional[str]:
+        # Generic name extraction
+        # 1. Look for child 'name'
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            return content[name_node.start_byte:name_node.end_byte]
+            
+        # 2. For variable/lexical declarations (TS/JS), the name is in a declarator
+        if node.type in ["lexical_declaration", "variable_declaration"]:
+            # usually children are variable_declarator
+            for child in node.children:
+                if child.type == "variable_declarator":
+                    return self._extract_name(child, content)
+        
+        # 3. For variable_declarator, name is 'name' field
+        if node.type == "variable_declarator":
+             name_node = node.child_by_field_name("name")
+             if name_node:
+                 return content[name_node.start_byte:name_node.end_byte]
+                 
+        return None
+
+    def _extract_imports(self, node: TSNode, content: str, language: str) -> Dict[str, str]:
         """
-        Pass 1: Parse the file and build a Symbol Table (identifier -> canonical_name).
-        For now, we'll extract function and class definitions.
-        Returns a dict: {identifier: canonical_name}
+        Extract imports from the AST node.
+        Returns a dict: {local_alias: canonical_source}
+        """
+        imports = {}
+        
+        # Python Imports
+        if language == "python":
+            if node.type == "import_statement":
+                # import os, sys
+                for child in node.children:
+                    if child.type == "dotted_name":
+                        name = content[child.start_byte:child.end_byte]
+                        imports[name] = name
+                    elif child.type == "aliased_import":
+                        # import numpy as np
+                        name_node = child.child_by_field_name("name")
+                        alias_node = child.child_by_field_name("alias")
+                        if name_node and alias_node:
+                            name = content[name_node.start_byte:name_node.end_byte]
+                            alias = content[alias_node.start_byte:alias_node.end_byte]
+                            imports[alias] = name
+
+            elif node.type == "import_from_statement":
+                # from os import path
+                module_node = node.child_by_field_name("module_name")
+                module_name = content[module_node.start_byte:module_node.end_byte] if module_node else ""
+                
+                for child in node.children:
+                    if child.type == "aliased_import":
+                         # from x import y as z
+                        name_node = child.child_by_field_name("name")
+                        alias_node = child.child_by_field_name("alias")
+                        if name_node and alias_node:
+                            name = content[name_node.start_byte:name_node.end_byte]
+                            alias = content[alias_node.start_byte:alias_node.end_byte]
+                            canonical = f"{module_name}.{name}" if module_name else name
+                            imports[alias] = canonical
+                    elif child.type == "dotted_name" and child != module_node:
+                         # from . import y (relative) or similar structure
+                         name = content[child.start_byte:child.end_byte]
+                         canonical = f"{module_name}.{name}" if module_name else name
+                         imports[name] = canonical
+                    elif child.type == "identifier" and child != module_node:
+                        # from x import y
+                        # In some parsers/versions, simple names might be identifiers
+                        name = content[child.start_byte:child.end_byte]
+                        canonical = f"{module_name}.{name}" if module_name else name
+                        imports[name] = canonical
+
+        # TypeScript/JS Imports
+        elif language in ["typescript", "tsx", "javascript"]:
+            if node.type == "import_statement":
+                source = ""
+                for child in node.children:
+                    if child.type == "string":
+                        source = content[child.start_byte:child.end_byte].strip("'\"")
+                
+                for child in node.children:
+                    if child.type == "import_clause":
+                        for subchild in child.children:
+                            if subchild.type == "named_imports":
+                                for specifier in subchild.children:
+                                    if specifier.type == "import_specifier":
+                                        name_node = specifier.child_by_field_name("name")
+                                        alias_node = specifier.child_by_field_name("alias")
+                                        
+                                        if name_node and alias_node:
+                                            name = content[name_node.start_byte:name_node.end_byte]
+                                            alias = content[alias_node.start_byte:alias_node.end_byte]
+                                            imports[alias] = f"{source}.{name}"
+                                        elif name_node: # Sometimes name is just a child identifier
+                                            name = content[name_node.start_byte:name_node.end_byte]
+                                            imports[name] = f"{source}.{name}"
+                                        else:
+                                            # Fallback: iterate children for identifier
+                                            for deep_child in specifier.children:
+                                                if deep_child.type == "identifier":
+                                                    name = content[deep_child.start_byte:deep_child.end_byte]
+                                                    imports[name] = f"{source}.{name}"
+                            elif subchild.type == "identifier":
+                                # import Default from 'y'
+                                name = content[subchild.start_byte:subchild.end_byte]
+                                imports[name] = f"{source}.default"
+
+        return imports
+
+    def build_symbol_table(self, file_content: str, language: str) -> Dict[str, str]:
+        """
+        Pass 1: Build a Symbol Table (identifier -> canonical_name).
+        Includes DEFINITIONS (functions/classes) and IMPORTS (aliases).
         """
         parser = TreeSitterUtils.get_parser(language)
         if not parser:
@@ -20,44 +135,69 @@ class SymbolExtractor:
         tree = parser.parse(bytes(file_content, "utf8"))
         root_node = tree.root_node
         
-        symbols = {}
-        
-        # Simple query for functions/classes (approximate, varies by language)
-        # This is a naive implementation. A robust one needs per-language queries.
-        # We will use a generic traversal for now to find "function_definition", "class_definition"
-        # and extract their names.
+        symbol_table = {}
         
         def traverse(node: TSNode, scope: str = ""):
-            node_type = node.type
-            new_scope = scope
-            
-            name = None
-            if node_type in ["function_definition", "class_definition", "method_definition"]:
-                # Find the 'name' child
-                name_node = node.child_by_field_name("name")
-                if name_node:
-                    name = file_content[name_node.start_byte:name_node.end_byte]
+            # 1. Definitions
+            if node.type in self.definition_types:
+                name = self._extract_name(node, file_content)
+                if name:
                     canonical = f"{scope}.{name}" if scope else name
-                    symbols[name] = canonical
-                    new_scope = canonical
-            
-            elif node_type == "identifier" and scope:
-                # If we are inside a scope, maybe we want to track it?
-                # For GDSKG, we mostly care about DEFINTIONS.
-                pass
+                    symbol_table[name] = canonical
+                    
+                    # Recurse into definition with new scope
+                    for child in node.children:
+                        traverse(child, canonical)
+                    return # Skip default recursion since we handled it
 
+            # 2. Imports
+            if node.type in ["import_statement", "import_from_statement"]:
+                 imports = self._extract_imports(node, file_content, language)
+                 symbol_table.update(imports)
+            
+            # Recurse
             for child in node.children:
-                traverse(child, new_scope)
+                traverse(child, scope)
 
         traverse(root_node)
-        return symbols
+        return symbol_table
 
-    def filter_diff_symbols(self, file_content: str, language: str, affected_lines: Set[int]) -> List[str]:
+    def extract_symbols(self, file_content: str, language: str) -> Dict[str, str]:
+        # Backward compatibility / specific definition extraction if needed
+        # For now, just return definitions from build_symbol_table?
+        # No, extract_symbols meant "What checks do we create SYMBOL nodes for?"
+        # We probably only want to create nodes for DEFINITIONS, not IMPORTS.
+        # So we should keep a version that only returns definitions.
+        
+        parser = TreeSitterUtils.get_parser(language)
+        if not parser:
+            return {}
+        tree = parser.parse(bytes(file_content, "utf8"))
+        root_node = tree.root_node
+        
+        definitions = {}
+        def traverse(node: TSNode, scope: str = ""):
+             if node.type in self.definition_types:
+                name = self._extract_name(node, file_content)
+                if name:
+                    canonical = f"{scope}.{name}" if scope else name
+                    definitions[name] = canonical
+                    for child in node.children:
+                        traverse(child, canonical)
+                    return
+             for child in node.children:
+                traverse(child, scope)
+        traverse(root_node)
+        return definitions
+
+    def filter_diff_symbols(self, file_content: str, language: str, affected_lines: Set[int], symbol_table: Dict[str, str] = None) -> List[str]:
         """
         Pass 2: Identify symbols occurring in the affected lines.
-        affected_lines: Set of 1-based line numbers.
-        Returns a list of Canonical Names.
+        Uses symbol_table to resolve identifiers to canonical names.
         """
+        if symbol_table is None:
+            symbol_table = {}
+            
         parser = TreeSitterUtils.get_parser(language)
         if not parser:
             return []
@@ -66,34 +206,38 @@ class SymbolExtractor:
         root_node = tree.root_node
         
         matched_symbols = set()
+        
 
-        def traverse(node: TSNode, current_symbol: str = None):
-            # Check if this node intersects with affected lines
-            # node.start_point is (row, col) 0-indexed.
-            start_line = node.start_point.row + 1
-            end_line = node.end_point.row + 1
+        def traverse(node: TSNode, current_scope: str = ""):
+            start_line = node.start_point[0] + 1
+            end_line = node.end_point[0] + 1
             
-            # Intersection logic: if the node overlaps with any affected line
-            # This is tricky: we want the *symbol* that is MODIFIED.
-            # If a line inside a function is changed, does that count as "Modified Symbol"?
-            # Spec says: "Only if the symbol is inside the diff + or - lines."
-            # This implies if I change the *body* of a function, the function symbol is modified?
-            # Or only if I rename it? "Symbol is inside the diff".
-            # Usually strict GDSKG interpretation: The function *definition* creates the symbol.
-            # If I stick to specific "identifiers", I should look for identifier nodes.
+            node_range = set(range(start_line, end_line + 1))
+            intersection = node_range.intersection(affected_lines)
             
-            # Let's try to map "identifiers" in the diff to their definitions.
+            # Update scope if defining
+            new_scope = current_scope
+            if node.type in self.definition_types:
+                name = self._extract_name(node, file_content)
+                if name:
+                     new_scope = f"{current_scope}.{name}" if current_scope else name
             
-            if node.type == "identifier":
-                 if start_line in affected_lines:
-                     name = file_content[node.start_byte:node.end_byte]
-                     # We assume we have a way to resolve this name to a canonical one.
-                     # Without full scope resolution (Pass 1), this is hard.
-                     # But for this prototype, we'll return the raw identifier.
-                     matched_symbols.add(name)
-            
+            if intersection:
+                # Check for Identifiers (Usages)
+                if node.type == "identifier":
+                    name = file_content[node.start_byte:node.end_byte]
+                    if name in symbol_table:
+                        matched_symbols.add(symbol_table[name])
+                
+                # Check for Definitions (Explicit Modification)
+                if node.type in self.definition_types:
+                    name = self._extract_name(node, file_content)
+                    if name:
+                         canonical = f"{current_scope}.{name}" if current_scope else name
+                         matched_symbols.add(canonical)
+
             for child in node.children:
-                traverse(child)
+                traverse(child, new_scope)
 
         traverse(root_node)
         return list(matched_symbols)

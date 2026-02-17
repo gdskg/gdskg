@@ -11,6 +11,7 @@ class NodeType(str, Enum):
     TIME_BUCKET = "TIME_BUCKET"
     SYMBOL = "SYMBOL"
     SECRET = "SECRET"
+    COMMIT_MESSAGE = "COMMIT_MESSAGE"
 
 class EdgeType(str, Enum):
     AUTHORED_BY = "AUTHORED_BY"
@@ -20,6 +21,7 @@ class EdgeType(str, Enum):
     MODIFIED_SYMBOL = "MODIFIED_SYMBOL"
     CONTEXTUAL_SYMBOL = "CONTEXTUAL_SYMBOL"
     REFERENCES_ENV = "REFERENCES_ENV"
+    HAS_MESSAGE = "HAS_MESSAGE"
 
 @dataclass
 class Node:

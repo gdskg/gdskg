@@ -1,6 +1,7 @@
 import typer
 import sys
 from pathlib import Path
+from typing import Optional, List
 from rich.console import Console
 
 app = typer.Typer(help="Git-Derived Software Knowledge Graph CLI")
@@ -65,6 +66,118 @@ def build(
         store.close()
         
     console.print("[yellow]Detailed analysis complete.[/yellow]")
+
+@app.command()
+def query(
+    query_str: str = typer.Argument(..., help="Search query (natural language or keywords)"),
+    graph: Path = typer.Option(
+        ..., "--graph", "-G",
+        help="Directory where the knowledge graph (SQLite db) is stored",
+        exists=True, file_okay=False, dir_okay=True, resolve_path=True
+    ),
+    repository: Optional[str] = typer.Option(
+        None, "--repository", "-R",
+        help="Optionally filter results by repository name"
+    ),
+    depth: int = typer.Option(
+        0, "--depth", "-D",
+        help="Depth of connections to retrieve (0 = just the node, 1 = immediate neighbors, etc.)"
+    ),
+    traverse: Optional[List[str]] = typer.Option(
+        None, "--dfs-attribute", "-T",
+        help="Specific node types to allowed traversal through (e.g., AUTHOR, TIME_BUCKET). Default: blocks AUTHOR, TIME_BUCKET, REPOSITORY."
+    )
+):
+    """
+    Query the Git-Derived Software Knowledge Graph.
+    """
+    db_path = graph / "gdskg.db"
+    if not db_path.exists():
+        console.print(f"[bold red]Error[/bold red]: Database not found at {db_path}")
+        raise typer.Exit(code=1)
+
+    from analysis.search_engine import SearchEngine
+    from rich.table import Table
+    from rich.text import Text
+
+    searcher = SearchEngine(str(db_path))
+    results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse)
+
+    if not results:
+        console.print("[yellow]No relevant matches found.[/yellow]")
+        return
+
+    table = Table(title=f"Search Results for: '{query_str}' (Depth: {depth})", box=None, show_lines=True)
+    table.add_column("Rel.", justify="right", style="cyan")
+    table.add_column("Commit", style="magenta")
+    table.add_column("Details", style="white")
+
+    for res in results:
+        # Create a detail block
+        detail = Text()
+        detail.append(f"{res['message'].split('\n')[0]}\n", style="bold white")
+        detail.append(f"Author: ", style="dim")
+        detail.append(f"{res['author']}  ", style="green")
+        detail.append(f"Date: ", style="dim")
+        detail.append(f"{res['date'][:10]}\n", style="green")
+
+        if depth > 0:
+            # Group connections by type
+            from core.schema import NodeType
+            grouped = {} # NodeType -> List[str]
+            for node_id, info in res['connections'].items():
+                ntype = info['type']
+                attrs = info.get('attributes', {})
+                
+                # Determine display name
+                if ntype == NodeType.REPOSITORY.value:
+                    display_name = attrs.get('name', Path(node_id).name)
+                elif ntype == NodeType.COMMIT_MESSAGE.value:
+                    # Show a snippet of the message
+                    content = attrs.get('content', node_id).strip()
+                    display_name = content.split('\n')[0][:50]
+                    if len(content.split('\n')[0]) > 50:
+                        display_name += "..."
+                elif ntype == NodeType.FILE.value:
+                    display_name = Path(node_id).name
+                else:
+                    display_name = node_id
+
+                if ntype not in grouped:
+                    grouped[ntype] = []
+                grouped[ntype].append(display_name)
+            
+            # Simple color mapping for types
+            type_colors = {
+                NodeType.FILE.value: "yellow",
+                NodeType.SYMBOL.value: "blue",
+                NodeType.AUTHOR.value: "green",
+                NodeType.COMMIT.value: "magenta",
+                NodeType.REPOSITORY.value: "cyan",
+                NodeType.TIME_BUCKET.value: "white",
+                NodeType.COMMIT_MESSAGE.value: "italic white"
+            }
+
+            for ntype, nodes in grouped.items():
+                color = type_colors.get(ntype, "white")
+                label = ntype.replace('_', ' ').title()
+                detail.append(f"{label}: ", style=f"dim {color}")
+                
+                # Show up to 5 nodes per type
+                node_names = [Path(n).name if ntype == NodeType.FILE.value else n for n in nodes]
+                detail.append(", ".join(node_names[:5]), style=color)
+                if len(node_names) > 5:
+                    detail.append(f" (+{len(node_names)-5} more)", style=f"dim {color}")
+                detail.append("\n")
+
+        table.add_row(
+            str(res["relevance"]),
+            res["id"][:8],
+            detail
+        )
+
+    console.print(table)
+    console.print(f"\n[bold green]Found {len(results)} relevant commits.[/bold green]")
 
 if __name__ == "__main__":
     app()

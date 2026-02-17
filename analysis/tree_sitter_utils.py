@@ -19,7 +19,7 @@ class TreeSitterUtils:
                 return None
 
         parser = Parser()
-        parser.language = TreeSitterUtils._languages[lang_name]
+        parser.set_language(TreeSitterUtils._languages[lang_name])
         return parser
 
     @staticmethod
@@ -32,7 +32,7 @@ class TreeSitterUtils:
             ".js": "javascript",
             ".jsx": "javascript",
             ".ts": "typescript",
-            ".tsx": "typescript",
+            ".tsx": "tsx",
             ".java": "java",
             ".go": "go",
             ".rs": "rust",
