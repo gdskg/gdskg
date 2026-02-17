@@ -15,7 +15,7 @@ class TestMockPlugin(PluginInterface):
     """
     A mock plugin that adds a specific node to every commit.
     """
-    def process(self, commit_node: Node, related_nodes: List[Node], related_edges: List[Edge], graph_api: GraphInterface) -> None:
+    def process(self, commit_node: Node, related_nodes: List[Node], related_edges: List[Edge], graph_api: GraphInterface, config: Dict[str, Any] = None) -> None:
         # Add a node connected to the commit
         plugin_node_id = f"PLUGIN_DATA:{commit_node.id}"
         graph_api.add_node(

@@ -4,3 +4,4 @@ tree-sitter-languages
 typer[all]
 rich
 pytest
+requests

@@ -13,13 +13,14 @@ from analysis.tree_sitter_utils import TreeSitterUtils
 from core.plugin_interfaces import PluginInterface, GraphInterface
 
 class GraphExtractor:
-    def __init__(self, repo_path: Path, graph_store: GraphStore, plugins: List[PluginInterface] = None):
+    def __init__(self, repo_path: Path, graph_store: GraphStore, plugins: List[PluginInterface] = None, plugin_config: Dict[str, Dict[str, Any]] = None):
         self.repo_path = repo_path
         self.store = graph_store
         self.repo = git.Repo(repo_path)
         self.symbol_extractor = SymbolExtractor()
         self.secret_scanner = SecretScanner()
         self.plugins = plugins or []
+        self.plugin_config = plugin_config or {}
     
     def process_repo(self):
         """
@@ -167,7 +168,7 @@ class GraphExtractor:
         # BUT, _process_diff_item inserts into store.
         
         # Let's collect the local nodes we created in this scope:
-        related_nodes = [msg_node, author_node, time_node] # + file nodes?
+        related_nodes = [msg_node, author_node, time_node, repo_node] # + file nodes?
         related_edges = [
             Edge(commit_node.id, msg_node.id, EdgeType.HAS_MESSAGE),
             Edge(commit_node.id, repo_node.id, EdgeType.PART_OF_REPO),
@@ -175,12 +176,74 @@ class GraphExtractor:
             Edge(commit_node.id, time_node.id, EdgeType.OCCURRED_IN)
         ]
         
+        
         # Instantiate API wrapper
         api = GraphAPIWrapper(self.store)
         
         for plugin in self.plugins:
             try:
-                plugin.process(commit_node, related_nodes, related_edges, api)
+                # specific config for this plugin
+                # We use the class name as the key for now
+                p_name = plugin.__class__.__name__
+                # Also try matching by module name if needed, but class name is safer for now? 
+                # Or main.py should pass a dict keyed by...? 
+                # Let's use class name for simplicity as we don't know the "CLI name" here easily 
+                # unless we store it on the plugin instance.
+                # Actually, main.py loads plugins. 
+                # But here we just have instances. 
+                # Let's assume keys in plugin_config match class names OR we rely on a 'name' attribute if we added one. 
+                # Since we didn't add 'name' to interface, let's try class name.
+                # However, the user passes "-P ClickUpTask:regex...", so the key is "ClickUpTask".
+                # If the class is "ClickUpPlugin", that matches? No.
+                # "ClickUpTask" maps to "ClickUpTask" folder. 
+                # The class name inside usually matches but not guaranteed. 
+                # Let's try to match loosely or assume main.py handles mapping?
+                # BETTER: plugin_config is passed as is. 
+                # BUT we need to know WHICH config to pass to THIS plugin.
+                # Let's assume plugin has a name attribute? No.
+                # Let's try to check based on the plugin module name or directory?
+                
+                # Hack: Try to find a config key that matches the plugin's class name or module name.
+                # If plugin is `sc.plugins.ClickUpTask.plugin.ClickUpPlugin`, maybe key is `ClickUpTask`?
+                
+                # Let's pass the whole config? No, that exposes too much.
+                # Let's just pass `plugin_config.get(plugin.__class__.__name__, {})` AND `plugin_config.get(folder_name)`?
+                
+                # Simpler: update PluginInterface to have a `name` property?
+                # Or just pass the whole dict and let plugin pick? 
+                
+                # The user said: "-P ClickUpTask:regex".
+                # ClickUpTask is the directory name. 
+                # So we want to pass config["ClickUpTask"].
+                # How do we know this plugin instance corresponds to "ClickUpTask"?
+                # In PluginManager, we load by name. We could attach the name to the instance.
+                
+                # Modification: I will pass specific config if found, otherwise empty.
+                # I'll try to guess the name from the module.
+                
+                config = {}
+                # plugin.__module__ might be 'gdskg_plugin_ClickUpTask' (from PluginManager loader)
+                # or 'plugins.ClickUpTask.plugin'
+                
+                parts = plugin.__module__.split('.')
+                # If using our loader: `gdskg_plugin_{name}`
+                module_name = plugin.__module__
+                
+                if module_name.startswith("gdskg_plugin_"):
+                    potential_name = module_name.replace("gdskg_plugin_", "")
+                    config = self.plugin_config.get(potential_name, {})
+                elif "plugins." in module_name:
+                    # local load: plugins.ClickUpTask.plugin
+                    # extract 'ClickUpTask'
+                    try:
+                        idx = parts.index("plugins")
+                        if idx + 1 < len(parts):
+                            potential_name = parts[idx+1]
+                            config = self.plugin_config.get(potential_name, {})
+                    except:
+                        pass
+
+                plugin.process(commit_node, related_nodes, related_edges, api, config)
             except Exception as e:
                 # "If a plugin fails, the system should proceed. If a plugin errors, it should be caught."
                 print(f"Error executing plugin {plugin}: {e}")

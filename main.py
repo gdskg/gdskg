@@ -26,6 +26,10 @@ def build(
     plugins: Optional[List[str]] = typer.Option(
         None, "--plugin", "-P",
         help="List of plugins to enable (e.g., 'python-complexity'). Plugins must exist under https://github.com/gdskg/"
+    ),
+    parameters: Optional[List[str]] = typer.Option(
+        None, "--parameter", "-X",
+        help="Plugin parameters in format 'PluginName:Key=Value' (e.g., 'ClickUpTask:regex=^CU-\\d+$')"
     )
 ):
     """
@@ -66,9 +70,29 @@ def build(
     if loaded_plugins:
         console.print(f"[green]Enabled {len(loaded_plugins)} plugins.[/green]")
 
+    # Parse Parameters
+    plugin_config = {}
+    if parameters:
+        for param in parameters:
+            try:
+                # Expect format Plugin:Key=Value
+                if ":" in param and "=" in param:
+                    plugin_part, rest = param.split(":", 1)
+                    key, value = rest.split("=", 1)
+                    if plugin_part not in plugin_config:
+                        plugin_config[plugin_part] = {}
+                    plugin_config[plugin_part][key] = value
+                else:
+                    console.print(f"[yellow]Warning: Ignoring malformed parameter '{param}'. Expected format 'Plugin:Key=Value'[/yellow]")
+            except Exception as e:
+                console.print(f"[yellow]Warning: Error parsing parameter '{param}': {e}[/yellow]")
+    
+    if plugin_config:
+        console.print(f"Plugin configuration: {plugin_config}")
+
     # Start Processing
     console.print(f"[bold green]Starting extraction...[/bold green]")
-    extractor = GraphExtractor(repository, store, plugins=loaded_plugins)
+    extractor = GraphExtractor(repository, store, plugins=loaded_plugins, plugin_config=plugin_config)
     
     try:
         extractor.process_repo()

@@ -42,6 +42,14 @@ class PluginManager:
                 logger.error(f"Failed to load plugin {name}: {e}")
 
     def _get_or_install_plugin(self, name: str) -> Path:
+        # Check local project plugins folder first (Portable)
+        project_root = Path(__file__).parent.parent
+        local_plugin_dir = project_root / "plugins" / name
+        
+        if local_plugin_dir.exists():
+            logger.info(f"Found local plugin: {name} at {local_plugin_dir}")
+            return local_plugin_dir
+
         target_dir = PLUGIN_DIR / name
         
         # Simple check: if dir exists, assume it's installed. 
