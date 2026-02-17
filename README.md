@@ -135,12 +135,38 @@ GDSKG includes a tray icon application that manages the MCP server in the backgr
 python -m gdskg.mcp_server.tray
 ```
 
-### Releases
+## Installation
 
-Standalone executables for the tray application are automatically built on every release tag (`v*`). You can download the latest version for your operating system from the [Releases](https://github.com/your-username/gdskg/releases) page.
+### Option 1: Docker (Recommended)
+Run the MCP server in a container without installing dependencies locally. This avoids macOS Gatekeeper issues.
 
-### Building Locally
+```bash
+# Pull the latest image
+docker pull ghcr.io/gdskg/gdskg:latest
 
+# Run the server in network mode (SSE) - Default behavior
+# This exposes port 8015 for local connections
+docker run -p 8015:8015 -v $(pwd):/data ghcr.io/gdskg/gdskg:latest
+
+# Run the server in interactive mode (Stdio)
+# Note: '-i' is required for the MCP server to communicate via stdin/stdout
+docker run -i -v $(pwd):/data ghcr.io/gdskg/gdskg:latest serve --transport stdio
+```
+
+### Option 2: Pre-built Executables
+Download the latest release for your OS from the [Releases page](https://github.com/gdskg/gdskg/releases).
+
+**Note for macOS users:** You may need to bypass Gatekeeper by right-clicking the app and selecting "Open", or running `xattr -d com.apple.quarantine gdskg-mcp-macos`.
+### Analyzing Remote Repositories
+You can analyze remote repositories directly by providing a URL. If the repository is private, ensure `GITHUB_TOKEN` is set in your environment.
+
+```bash
+export GITHUB_TOKEN=your_token
+docker run -e GITHUB_TOKEN=$GITHUB_TOKEN -v $(pwd):/data ghcr.io/gdskg/gdskg:latest build --repository https://github.com/owner/repo --graph /data/graph
+```
+The repository will be cloned to a local cache within the container (or your mounted volume).
+
+### Option 3: From Source
 You can build the standalone executable locally using the provided `Makefile`:
 
 ```bash

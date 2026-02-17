@@ -3,6 +3,7 @@
 PYTHON = python3
 PIP = .venv/bin/pip
 PYINSTALLER = .venv/bin/pyinstaller
+VERSION = $(shell cat VERSION)
 
 # Detect OS
 ifeq ($(OS),Windows_NT)
@@ -43,3 +44,8 @@ build: install
 clean:
 	rm -rf build dist *.spec
 	@echo "Cleaned build artifacts."
+
+docker-build:
+	docker build -t gdskg:$(VERSION) .
+	docker tag gdskg:$(VERSION) gdskg:latest
+	@echo "Docker image built: gdskg:$(VERSION) and gdskg:latest"

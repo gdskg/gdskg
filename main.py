@@ -9,10 +9,9 @@ console = Console()
 
 @app.command()
 def build(
-    repository: Path = typer.Option(
+    repository: str = typer.Option(
         ..., "--repository", "-R", 
-        help="Path to the local git repository to analyze",
-        exists=True, file_okay=False, dir_okay=True, resolve_path=True
+        help="Path or URL to the git repository to analyze"
     ),
     graph: Path = typer.Option(
         ..., "--graph", "-G",
@@ -36,10 +35,58 @@ def build(
     Build the Git-Derived Software Knowledge Graph.
     """
     console.print(f"[bold green]Starting GDSKG Build[/bold green]")
-    console.print(f"Repository: [blue]{repository}[/blue]")
+    
+    # Check if repository is a URL
+    repo_path = None
+    if repository.startswith("http://") or repository.startswith("https://"):
+        import os
+        from git import Repo
+        
+        console.print(f"Detected remote repository URL: [blue]{repository}[/blue]")
+        
+        # Inject token if available
+        token = os.environ.get("GITHUB_TOKEN")
+        if token and "@" not in repository:
+            # Simple injection for HTTPS
+            repo_url = repository.replace("https://", f"https://{token}@")
+        else:
+            repo_url = repository
+            
+        # Determine local checkout path
+        # Use a consistent cache location
+        cache_dir = Path.home() / ".gdskg" / "cache"
+        repo_name = repository.split("/")[-1].replace(".git", "")
+        checkout_path = cache_dir / repo_name
+        
+        console.print(f"Checkout path: [blue]{checkout_path}[/blue]")
+        
+        if checkout_path.exists():
+            console.print("Repository already cached. Updating...")
+            try:
+                repo = Repo(checkout_path)
+                repo.remotes.origin.pull()
+            except Exception as e:
+                console.print(f"[yellow]Warning: Failed to update cached repo: {e}[/yellow]")
+        else:
+            console.print("Cloning repository...")
+            try:
+                Repo.clone_from(repo_url, checkout_path)
+            except Exception as e:
+                console.print(f"[bold red]Error[/bold red]: Failed to clone repository: {e}")
+                raise typer.Exit(code=1)
+        
+        repo_path = checkout_path
+    else:
+        # Local path
+        repo_path = Path(repository).resolve()
+        if not repo_path.exists():
+             console.print(f"[bold red]Error[/bold red]: Path {repo_path} does not exist.")
+             raise typer.Exit(code=1)
+
+    console.print(f"Repository Path: [blue]{repo_path}[/blue]")
     console.print(f"Graph Output: [blue]{graph}[/blue]")
     
-    if not (repository / ".git").exists():
+    if not (repo_path / ".git").exists():
         console.print("[bold red]Error[/bold red]: The specified directory is not a git repository.")
         raise typer.Exit(code=1)
 
@@ -217,6 +264,26 @@ def query(
 
     console.print(table)
     console.print(f"\n[bold green]Found {len(results)} relevant commits.[/bold green]")
+
+@app.command()
+def serve(
+    transport: str = typer.Option("sse", "--transport", "-t", help="Transport protocol: 'sse' (default) or 'stdio'"),
+    port: int = typer.Option(8015, "--port", "-p", help="Port to listen on (SSE only)"),
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Host to listen on (SSE only)")
+):
+    """
+    Start the MCP server.
+    """
+    from mcp_server.server import mcp
+    
+    if transport.lower() == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        # FastMCP.run() doesn't take port/host arguments directly in all versions.
+        # It reads them from the settings object.
+        mcp.settings.host = host
+        mcp.settings.port = port
+        mcp.run(transport="sse")
 
 if __name__ == "__main__":
     app()
