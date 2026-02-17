@@ -42,6 +42,20 @@ pip install -r requirements.txt
 
 ---
 
+## Environment Variables
+
+Some GDSKG plugins require environment variables for authentication with external services:
+
+| Variable | Required By | Description |
+| :--- | :--- | :--- |
+| **`GITHUB_PAT`** | `GitHubPR` | A GitHub Personal Access Token with `repo` scope to fetch Pull Request metadata. |
+| **`CLICKUP_API_KEY`** | `ClickUpTask` | Your ClickUp API Token (found in User Settings > Apps) to fetch Task metadata. |
+
+> [!NOTE]
+> These variables are only required if you enable the corresponding plugins during indexing.
+
+---
+
 ## Usage Guide
 
 ### 1. Build the Intelligence Graph
