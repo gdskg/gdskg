@@ -1,10 +1,17 @@
 # Git-Derived Software Knowledge Graph (GDSKG)
 
+<p align="center">
+  <img src="docs/assets/gadskig_mascot.png" width="300" alt="Gadskig Mascot">
+  <br>
+  <i>Meet Gadskig, who is always hungry for more knowledge</i>
+</p>
+
+
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![Tree-sitter](https://img.shields.io/badge/parsing-tree--sitter-orange.svg)](https://tree-sitter.github.io/tree-sitter/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**GDSKG** is a high-fidelity intelligence tool designed to map the deep evolutionary relationships within software repositories. By combining Git history with AST-level code analysis via Tree-sitter, GDSKG builds a navigable knowledge graph that transcends simple text search.
+Meet **Gadskig**, the cute little monster guardian of your codebase. **GDSKG** is a high-fidelity intelligence tool designed to map the deep evolutionary relationships within software repositories. By combining Git history with AST-level code analysis via Tree-sitter, GDSKG builds a navigable knowledge graph that transcends simple text search.
 
 ---
 
