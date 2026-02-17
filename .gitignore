@@ -3,3 +3,4 @@ output_graph/
 __pycache__
 .pytest_cache.
 *.db
+.venv/

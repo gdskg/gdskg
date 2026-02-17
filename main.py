@@ -22,6 +22,10 @@ def build(
     overwrite: bool = typer.Option(
         False, "--overwrite", "-O",
         help="Overwrite existing graph database if it exists"
+    ),
+    plugins: Optional[List[str]] = typer.Option(
+        None, "--plugin", "-P",
+        help="List of plugins to enable (e.g., 'python-complexity'). Plugins must exist under https://github.com/gdskg/"
     )
 ):
     """
@@ -48,12 +52,23 @@ def build(
     # Initialize DB
     from core.graph_store import GraphStore
     from core.extractor import GraphExtractor
+    from core.plugin_manager import PluginManager
     
     store = GraphStore(db_path)
     
+    # Load Plugins
+    plugin_manager = PluginManager()
+    if plugins:
+        console.print(f"Loading plugins: {plugins}...")
+        plugin_manager.load_plugins(plugins)
+    
+    loaded_plugins = plugin_manager.get_plugins()
+    if loaded_plugins:
+        console.print(f"[green]Enabled {len(loaded_plugins)} plugins.[/green]")
+
     # Start Processing
     console.print(f"[bold green]Starting extraction...[/bold green]")
-    extractor = GraphExtractor(repository, store)
+    extractor = GraphExtractor(repository, store, plugins=loaded_plugins)
     
     try:
         extractor.process_repo()

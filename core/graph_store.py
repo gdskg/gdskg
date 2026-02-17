@@ -47,6 +47,7 @@ class GraphStore:
 
     def upsert_node(self, node: Node):
         """Insert or update a node."""
+        node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -54,7 +55,7 @@ class GraphStore:
                 VALUES (?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     attributes = json_patch(nodes.attributes, excluded.attributes)
-            """, (node.id, node.type.value, json.dumps(node.attributes)))
+            """, (node.id, node_type, json.dumps(node.attributes)))
             conn.commit()
 
     def upsert_symbol(self, id: str, file_path: str):
@@ -68,6 +69,7 @@ class GraphStore:
 
     def upsert_edge(self, edge: Edge):
         """Insert or update an edge."""
+        edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -76,14 +78,18 @@ class GraphStore:
                 ON CONFLICT(id) DO UPDATE SET
                     weight = excluded.weight,
                     attributes = json_patch(edges.attributes, excluded.attributes)
-            """, (edge.id, edge.source_id, edge.target_id, edge.type.value, edge.weight, json.dumps(edge.attributes)))
+            """, (edge.id, edge.source_id, edge.target_id, edge_type, edge.weight, json.dumps(edge.attributes)))
             conn.commit()
 
     def upsert_nodes(self, nodes: List[Node]):
         """Batch upsert nodes."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            data = [(node.id, node.type.value, json.dumps(node.attributes)) for node in nodes]
+            data = []
+            for node in nodes:
+                node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
+                data.append((node.id, node_type, json.dumps(node.attributes)))
+            
             cursor.executemany("""
                 INSERT INTO nodes (id, type, attributes)
                 VALUES (?, ?, ?)
@@ -96,7 +102,11 @@ class GraphStore:
         """Batch upsert edges."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            data = [(edge.id, edge.source_id, edge.target_id, edge.type.value, edge.weight, json.dumps(edge.attributes)) for edge in edges]
+            data = []
+            for edge in edges:
+                edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+                data.append((edge.id, edge.source_id, edge.target_id, edge_type, edge.weight, json.dumps(edge.attributes)))
+
             cursor.executemany("""
                 INSERT INTO edges (id, source_id, target_id, type, weight, attributes)
                 VALUES (?, ?, ?, ?, ?, ?)

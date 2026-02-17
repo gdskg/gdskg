@@ -2,7 +2,7 @@ import git
 import re
 import hashlib
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from rich.progress import Progress
 
 from core.graph_store import GraphStore
@@ -10,14 +10,16 @@ from core.schema import Node, Edge, NodeType, EdgeType
 from analysis.symbol_extractor import SymbolExtractor
 from analysis.secret_scanner import SecretScanner
 from analysis.tree_sitter_utils import TreeSitterUtils
+from core.plugin_interfaces import PluginInterface, GraphInterface
 
 class GraphExtractor:
-    def __init__(self, repo_path: Path, graph_store: GraphStore):
+    def __init__(self, repo_path: Path, graph_store: GraphStore, plugins: List[PluginInterface] = None):
         self.repo_path = repo_path
         self.store = graph_store
         self.repo = git.Repo(repo_path)
         self.symbol_extractor = SymbolExtractor()
         self.secret_scanner = SecretScanner()
+        self.plugins = plugins or []
     
     def process_repo(self):
         """
@@ -150,6 +152,39 @@ class GraphExtractor:
         for diff in diffs:
             self._process_diff_item(diff, commit_node)
 
+        # --- Plugin processing ---
+        # "process baseline nodes... then process in a consistent order all applied plugins"
+        # Gather related nodes/edges for the context
+        # We constructed: commit_node, msg_node, author_node, time_node
+        # And edges connecting them.
+        # Also file nodes/edges from _process_diff_item (which are committed to store but we might not have list here easily without tracking)
+        # The prompt says: "sends the current commit node and all its directly related edges + nodes"
+        
+        # For simplicity, we can pass what we have locally. 
+        # To pass ALL related nodes (including files), we'd need to return them from _process_diff_item or query the store.
+        # Let's assume for now passing the core metadata nodes (Author, Msg, Time) is sufficient, 
+        # or we fetch from store if needed. 
+        # BUT, _process_diff_item inserts into store.
+        
+        # Let's collect the local nodes we created in this scope:
+        related_nodes = [msg_node, author_node, time_node] # + file nodes?
+        related_edges = [
+            Edge(commit_node.id, msg_node.id, EdgeType.HAS_MESSAGE),
+            Edge(commit_node.id, repo_node.id, EdgeType.PART_OF_REPO),
+            Edge(commit_node.id, author_node.id, EdgeType.AUTHORED_BY),
+            Edge(commit_node.id, time_node.id, EdgeType.OCCURRED_IN)
+        ]
+        
+        # Instantiate API wrapper
+        api = GraphAPIWrapper(self.store)
+        
+        for plugin in self.plugins:
+            try:
+                plugin.process(commit_node, related_nodes, related_edges, api)
+            except Exception as e:
+                # "If a plugin fails, the system should proceed. If a plugin errors, it should be caught."
+                print(f"Error executing plugin {plugin}: {e}")
+
     def _process_diff_item(self, diff: git.Diff, commit_node: Node):
         # File path
         # a_path is source, b_path is target. 
@@ -255,5 +290,16 @@ class GraphExtractor:
         except Exception as e:
             # print(f"Error processing {file_path}: {e}")
             pass
+
+class GraphAPIWrapper(GraphInterface):
+    def __init__(self, store: GraphStore):
+        self.store = store
+    
+    def add_node(self, id: str, type: str, attributes: Dict[str, Any] = None) -> None:
+        self.store.upsert_node(Node(id=id, type=type, attributes=attributes or {}))
+        
+    def add_edge(self, source_id: str, target_id: str, type: str, attributes: Dict[str, Any] = None) -> None:
+        self.store.upsert_edge(Edge(source_id=source_id, target_id=target_id, type=type, attributes=attributes or {}))
+
 
 
