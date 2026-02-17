@@ -70,6 +70,59 @@ python main.py query "database" -G ./graph_output -D 3 -T Symbol -T File
 
 ---
 
+## MCP Server
+
+GDSKG provides an MCP (Model Context Protocol) server to allow AI assistants to directly interact with the knowledge graph.
+
+### Tools
+
+#### `index_folder`
+Indexes a local git repository into the knowledge graph. Supports all functionality available in the CLI.
+
+**Parameters:**
+- `path` (str): Absolute path to the local git repository.
+- `graph_path` (str, optional): Directory to store the graph DB. Defaults to `./gdskg_graph`.
+- `overwrite` (bool, optional): Overwrite existing database. Default `False`.
+- `plugins` (List[str], optional): List of plugins to enable (e.g., `["GitHubPR", "ClickUpTask"]`).
+- `parameters` (List[str], optional): Plugin configuration in format `["Plugin:Key=Value"]`.
+
+#### `query_knowledge_graph`
+Queries the knowledge graph using natural language.
+
+**Parameters:**
+- `query` (str): Search query or question.
+- `graph_path` (str, optional): Path to the graph DB.
+- `limit` (int, optional): Max results. Default `10`.
+
+### Running the Server
+```bash
+# Run server using the provided wrapper or directly
+python -m gdskg.mcp_server.server
+```
+
+---
+
+## Plugins
+
+GDSKG supports a plugin system to enrich the graph with external data. Plugins are located in the `plugins/` directory.
+
+### Available Plugins
+
+- **`GitHubPR`**: Enriches the graph with GitHub Pull Request data.
+- **`ClickUpTask`**: Enriches the graph with ClickUp task data.
+
+### Using Plugins via MCP
+To enable plugins when indexing via MCP, provide the `plugins` and `parameters` arguments:
+```json
+{
+  "path": "/absolute/path/to/repo",
+  "plugins": ["GitHubPR"],
+  "parameters": ["GitHubPR:token=ghp_your_token_here"]
+}
+```
+
+---
+
 ## Schema Architecture
 
 ### Node Dictionary
