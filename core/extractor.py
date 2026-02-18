@@ -186,7 +186,6 @@ class GraphExtractor:
             except Exception as e:
                 print(f"Error executing plugin {plugin}: {e}")
 
-
     def _process_diff_item(self, diff: git.Diff, commit_node: Node) -> None:
         """
         Analyze a specific file change (diff) within a commit.
@@ -295,7 +294,6 @@ class GraphExtractor:
                     type=EdgeType.REFERENCES_ENV
                 ))
 
-
         except Exception as e:
             # print(f"Error processing {file_path}: {e}")
             pass
@@ -342,6 +340,3 @@ class GraphAPIWrapper(GraphInterface):
         """
 
         self.store.upsert_edge(Edge(source_id=source_id, target_id=target_id, type=type, attributes=attributes or {}))
-
-
-
