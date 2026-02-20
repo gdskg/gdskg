@@ -10,18 +10,16 @@ class SecretScanner:
     """
 
     # Common patterns for env vars / secrets
-    PATTERNS = [
-        r"process\.env\.([A-Z_][A-Z0-9_]*)",  # JS/TS
-        r"os\.environ\.get\(['\"]([A-Z_][A-Z0-9_]*)['\"]", # Python
-        r"os\.getenv\(['\"]([A-Z_][A-Z0-9_]*)['\"]",      # Python
-        r"ENV\[['\"]([A-Z_][A-Z0-9_]*)['\"]\]",            # Ruby/Crystal
-        r"\$([A-Z_][A-Z0-9_]*)",                           # Shell
-        r"([A-Z_][A-Z0-9_]*_KEY)",                         # General Heuristic
-        r"([A-Z_][A-Z0-9_]*_SECRET)",                      # General Heuristic
-        r"([A-Z_][A-Z0-9_]*_TOKEN)",                       # General Heuristic
-    ]
-    
-    COMPILED = [re.compile(p) for p in PATTERNS]
+    COMBINED_PATTERN = re.compile(
+        r"process\.env\.([A-Z_][A-Z0-9_]*)|"
+        r"os\.environ\.get\(['\"]([A-Z_][A-Z0-9_]*)['\"]|"
+        r"os\.getenv\(['\"]([A-Z_][A-Z0-9_]*)['\"]|"
+        r"ENV\[['\"]([A-Z_][A-Z0-9_]*)['\"]\]|"
+        r"\$([A-Z_][A-Z0-9_]*)|"
+        r"([A-Z_][A-Z0-9_]*_KEY)|"
+        r"([A-Z_][A-Z0-9_]*_SECRET)|"
+        r"([A-Z_][A-Z0-9_]*_TOKEN)"
+    )
 
     def scan(self, content: str) -> List[str]:
         """
@@ -35,12 +33,8 @@ class SecretScanner:
         """
 
         found = set()
-        for pattern in self.COMPILED:
-            matches = pattern.findall(content)
-            for match in matches:
-                # Some groups might be distinct, strict regexes usually return the group
-                if isinstance(match, tuple):
-                    match = match[0] 
-                if match:
-                    found.add(match)
+        for match in self.COMBINED_PATTERN.finditer(content):
+            for group in match.groups():
+                if group:
+                    found.add(group)
         return list(found)

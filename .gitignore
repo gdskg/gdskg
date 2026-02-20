@@ -3,10 +3,11 @@ test_repos/
 output_graph/
 __pycache__
 .pytest_cache.
-*.db
+*.db*
 .venv/
 .DS_Store
 gdskg-mcp.spec
 build/
 dist/
 *.log
+*.prof

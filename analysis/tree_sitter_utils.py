@@ -9,26 +9,19 @@ class TreeSitterUtils:
     """
 
     _languages = {}
+    _parsers = {}
 
     @staticmethod
     def get_parser(lang_name: str) -> Parser:
         """
         Retrieve a tree-sitter parser for the specified language.
-
-        Args:
-            lang_name (str): The name of the language (e.g., 'python', 'javascript').
-
-        Returns:
-            Parser: A tree-sitter Parser instance, or None if the language is not supported.
         """
-
         if lang_name not in TreeSitterUtils._languages:
             try:
                 language = tree_sitter_languages.get_language(lang_name)
                 TreeSitterUtils._languages[lang_name] = language
             except Exception as e:
-                print(f"Warning: Could not load language '{lang_name}': {e}")
-
+                # Silently return None; map_extension_to_language might return lang for missing parser
                 return None
 
         parser = Parser()

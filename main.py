@@ -152,20 +152,11 @@ def build(
         console=console,
         transient=True
     ) as progress:
-        # Graph Extraction
-        extract_task = progress.add_task("[green]Extracting graph...", total=None) 
-        # We need to get total commits for progress
-        from git import Repo
-        repo = Repo(repo_path)
-        commits_total = sum(1 for _ in repo.iter_commits())
-        progress.update(extract_task, total=commits_total)
-        
         extractor = GraphExtractor(repo_path, store, plugins=loaded_plugins, plugin_config=plugin_config, 
-                                   progress=progress, task_id=extract_task)
+                                   progress=progress, task_id=None)
         
         try:
             extractor.process_repo()
-            progress.update(extract_task, completed=commits_total)
             
             node_count = store.count_nodes()
             console.print(f"[bold green]✓[/bold green] Graph built with [blue]{node_count}[/blue] nodes.")

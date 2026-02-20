@@ -21,75 +21,70 @@ class GraphStore:
         """
 
         self.db_path = db_path
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn.execute("PRAGMA synchronous=OFF;")
+        self.conn.execute("PRAGMA cache_size=-64000;")
         self._init_db()
+
+        self._nodes_cache = {}
+        self._edges_cache = {}
 
     def _init_db(self) -> None:
         """
         Initialize the SQLite database schema by creating necessary tables and indices.
         """
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-
-                CREATE TABLE IF NOT EXISTS nodes (
-                    id TEXT PRIMARY KEY,
-                    type TEXT NOT NULL,
-                    attributes JSON
-                )
-            """)
-            
-            cursor.execute("""
-
-                CREATE TABLE IF NOT EXISTS edges (
-                    id TEXT PRIMARY KEY,
-                    source_id TEXT NOT NULL,
-                    target_id TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    weight REAL DEFAULT 1.0,
-                    attributes JSON,
-                    FOREIGN KEY(source_id) REFERENCES nodes(id),
-                    FOREIGN KEY(target_id) REFERENCES nodes(id)
-                )
-            """)
-            
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type)")
-
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(type)")
-            
-            conn.commit()
+        cursor = self.conn.cursor()
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS nodes (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                attributes JSON
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS edges (
+                id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                weight REAL DEFAULT 1.0,
+                attributes JSON,
+                FOREIGN KEY(source_id) REFERENCES nodes(id),
+                FOREIGN KEY(target_id) REFERENCES nodes(id)
+            )
+        """)
+        
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_source_type ON edges(source_id, type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_target_type ON edges(target_id, type)")
+        
+        self.conn.commit()
 
     def upsert_node(self, node: Node) -> None:
         """
-        Insert a new node or update an existing one if the ID already exists.
-
-        Args:
-            node (Node): The node object to store.
+        Cache node in memory, merging attributes if it already exists.
         """
-
-        node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO nodes (id, type, attributes)
-                VALUES (?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    attributes = json_patch(nodes.attributes, excluded.attributes)
-            """, (node.id, node_type, json.dumps(node.attributes)))
-            conn.commit()
+        if node.id in self._nodes_cache:
+            existing = self._nodes_cache[node.id]
+            # Merge attributes
+            if node.attributes:
+                if not existing.attributes:
+                    existing.attributes = {}
+                existing.attributes.update(node.attributes)
+        else:
+            self._nodes_cache[node.id] = node
 
     def upsert_symbol(self, id: str, file_path: str) -> None:
         """
         Helper method to specifically upsert a symbol node.
-
-        Args:
-            id (str): The unique identifier of the symbol.
-            file_path (str): The path to the file where the symbol is defined.
         """
-
         node = Node(
             id=id, 
             type=NodeType.SYMBOL, 
@@ -99,61 +94,74 @@ class GraphStore:
 
     def upsert_edge(self, edge: Edge) -> None:
         """
-        Insert a new edge or update an existing one if the ID already exists.
-
-        Args:
-            edge (Edge): The edge object to store.
+        Cache edge in memory.
         """
+        # Edges with same ID (source-target-type) should have merged attributes
+        if edge.id in self._edges_cache:
+            existing = self._edges_cache[edge.id]
+            if edge.attributes:
+                if not existing.attributes:
+                    existing.attributes = {}
+                existing.attributes.update(edge.attributes)
+            existing.weight = max(existing.weight, edge.weight)
+        else:
+            self._edges_cache[edge.id] = edge
 
-        edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO edges (id, source_id, target_id, type, weight, attributes)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    weight = excluded.weight,
-                    attributes = json_patch(edges.attributes, excluded.attributes)
-            """, (edge.id, edge.source_id, edge.target_id, edge_type, edge.weight, json.dumps(edge.attributes)))
-            conn.commit()
-
-    def upsert_nodes(self, nodes: List[Node]) -> None:
+    def get_node(self, node_id: str) -> Optional[Node]:
         """
-        Perform a batch upsert of multiple nodes.
-
-        Args:
-            nodes (List[Node]): A list of node objects to store.
+        Retrieve a single node by its ID, checking memory cache first.
         """
+        # Check memory first (important for plugins)
+        if node_id in self._nodes_cache:
+            return self._nodes_cache[node_id]
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            data = []
-            for node in nodes:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, type, attributes FROM nodes WHERE id = ?", (node_id,))
+        row = cursor.fetchone()
+        if row:
+            return Node(id=row[0], type=NodeType(row[1]), attributes=json.loads(row[2]))
+        return None
+    
+    def count_nodes(self) -> int:
+        """
+        Count total nodes (DB + Memory).
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM nodes")
+        db_count = cursor.fetchone()[0]
+        # This is an approximation if they overlap, but usually safe for progress stats
+        return db_count + len(self._nodes_cache)
+
+    def flush(self) -> None:
+        """
+        Perform the final massive dump of all memory-cached nodes/edges to SQLite.
+        """
+        if not self._nodes_cache and not self._edges_cache:
+            return
+
+        cursor = self.conn.cursor()
+        
+        # Phase 1: Bulk Upsert Nodes
+        if self._nodes_cache:
+            node_data = []
+            for node in self._nodes_cache.values():
                 node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
-                data.append((node.id, node_type, json.dumps(node.attributes)))
+                node_data.append((node.id, node_type, json.dumps(node.attributes)))
             
             cursor.executemany("""
                 INSERT INTO nodes (id, type, attributes)
                 VALUES (?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     attributes = json_patch(nodes.attributes, excluded.attributes)
-            """, data)
-            conn.commit()
+            """, node_data)
+            self._nodes_cache.clear()
 
-    def upsert_edges(self, edges: List[Edge]) -> None:
-        """
-        Perform a batch upsert of multiple edges.
-
-        Args:
-            edges (List[Edge]): A list of edge objects to store.
-        """
-
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            data = []
-            for edge in edges:
+        # Phase 2: Bulk Upsert Edges
+        if self._edges_cache:
+            edge_data = []
+            for edge in self._edges_cache.values():
                 edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
-                data.append((edge.id, edge.source_id, edge.target_id, edge_type, edge.weight, json.dumps(edge.attributes)))
+                edge_data.append((edge.id, edge.source_id, edge.target_id, edge_type, edge.weight, json.dumps(edge.attributes)))
 
             cursor.executemany("""
                 INSERT INTO edges (id, source_id, target_id, type, weight, attributes)
@@ -161,44 +169,28 @@ class GraphStore:
                 ON CONFLICT(id) DO UPDATE SET
                     weight = excluded.weight,
                     attributes = json_patch(edges.attributes, excluded.attributes)
-            """, data)
-            conn.commit()
+            """, edge_data)
+            self._edges_cache.clear()
 
-    def get_node(self, node_id: str) -> Optional[Node]:
+        self.conn.commit()
+
+    def commit(self) -> None:
         """
-        Retrieve a single node by its ID.
-
-        Args:
-            node_id (str): The unique identifier of the node.
-
-        Returns:
-            Optional[Node]: The node object if found, otherwise None.
+        Commit skip - we use flush/finalize for bulk performance.
         """
+        pass
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, type, attributes FROM nodes WHERE id = ?", (node_id,))
-            row = cursor.fetchone()
-            if row:
-                return Node(id=row[0], type=NodeType(row[1]), attributes=json.loads(row[2]))
-        return None
-    
-    def count_nodes(self) -> int:
+    def finalize(self) -> None:
         """
-        Count the total number of nodes in the graph.
-
-        Returns:
-            int: The total count of nodes.
+        Final dump of all data.
         """
-
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM nodes")
-            return cursor.fetchone()[0]
+        self.flush()
 
     def close(self) -> None:
         """
-        Close the database connection (no-op as currently using context managers).
+        Finalize and close.
         """
+        if hasattr(self, 'conn'):
+            self.finalize()
+            self.conn.close()
 
-        pass

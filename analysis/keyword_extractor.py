@@ -5,6 +5,7 @@ from nltk.tokenize import word_tokenize
 from typing import List, Set
 import re
 import collections
+import functools
 
 class KeywordExtractor:
     """
@@ -61,6 +62,11 @@ class KeywordExtractor:
             'global', 'nonlocal', 'del', 'pass', 'yield', 'none', 'self', 'cls', 'super'
         })
 
+    _URL_REGEX = re.compile(r'https?://\S+|www\.\S+')
+    _NON_ALPHA_REGEX = re.compile(r'[^a-zA-Z\s]')
+    _CAMEL_CASE_REGEX = re.compile(r'([a-z])([A-Z])')
+
+    @functools.lru_cache(maxsize=100000)
     def extract_keywords(self, text: str, is_code: bool = False) -> List[str]:
         """
         Extracts nouns from text, lemmatizes them, and filters out stop words.
@@ -77,20 +83,29 @@ class KeywordExtractor:
 
         if is_code:
             # Split camelCase and snake_case
-            text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+            text = self._CAMEL_CASE_REGEX.sub(r'\1 \2', text)
             text = text.replace('_', ' ')
             text = text.replace('-', ' ')
 
         # Simple cleaning
         text = text.lower()
         # Remove URLs
-        text = re.sub(r'https?://\S+|www\.\S+', '', text)
+        text = self._URL_REGEX.sub('', text)
         # Remove non-alphanumeric characters but keep spaces
-        text = re.sub(r'[^a-zA-Z\s]', ' ', text)
+        text = self._NON_ALPHA_REGEX.sub(' ', text)
         
-        tokens = word_tokenize(text)
+        tokens = text.split() if is_code else word_tokenize(text)
         
-        # POS Tagging
+        if is_code:
+            keywords = []
+            for word in tokens:
+                if word not in self.stop_words and len(word) > 2:
+                    lemma = self.lemmatizer.lemmatize(word)
+                    if lemma not in self.stop_words and len(lemma) > 2:
+                         keywords.append(lemma)
+            return keywords
+
+        # POS Tagging for non-code text (e.g. commit messages)
         tagged = nltk.pos_tag(tokens)
         
         keywords = []

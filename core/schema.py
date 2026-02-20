@@ -44,6 +44,8 @@ class EdgeType(str, Enum):
     HAS_VERSION = "HAS_VERSION"
     PREVIOUS_VERSION = "PREVIOUS_VERSION"
     CREATED_VERSION = "CREATED_VERSION"
+    COMMITTED_BY = "COMMITTED_BY"
+    PARENT_OF = "PARENT_OF"
 
 @dataclass
 class Node:

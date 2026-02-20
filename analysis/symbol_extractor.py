@@ -2,6 +2,7 @@ from typing import List, Dict, Tuple, Set, Optional
 from tree_sitter import Node as TSNode
 from analysis.tree_sitter_utils import TreeSitterUtils
 import re
+import bisect
 
 class SymbolExtractor:
     """
@@ -176,7 +177,7 @@ class SymbolExtractor:
 
         return imports
 
-    def build_symbol_table(self, file_content: str, language: str) -> Dict[str, str]:
+    def build_symbol_table(self, file_content: str, language: str, tree=None) -> Dict[str, str]:
         """
         Build a comprehensive mapping of identifiers to their canonical names.
         
@@ -186,16 +187,18 @@ class SymbolExtractor:
         Args:
             file_content (str): The content of the file to analyze.
             language (str): The programming language.
+            tree: Optional tree-sitter Tree.
 
         Returns:
             Dict[str, str]: A dictionary mapping identifiers to canonical names.
         """
 
-        parser = TreeSitterUtils.get_parser(language)
-        if not parser:
-            return {}
-
-        tree = parser.parse(bytes(file_content, "utf8"))
+        if tree is None:
+            parser = TreeSitterUtils.get_parser(language)
+            if not parser:
+                return {}
+            tree = parser.parse(bytes(file_content, "utf8"))
+            
         root_node = tree.root_node
         
         symbol_table = {}
@@ -225,13 +228,14 @@ class SymbolExtractor:
         traverse(root_node)
         return symbol_table
 
-    def extract_symbols(self, file_content: str, language: str) -> Dict[str, str]:
+    def extract_symbols(self, file_content: str, language: str, tree=None) -> Dict[str, str]:
         """
         Extract only the definitions (classes/functions) from the source code.
 
         Args:
             file_content (str): The source code content.
             language (str): The programming language.
+            tree: Optional tree-sitter Tree.
 
         Returns:
             Dict[str, str]: A mapping of definition names to their canonical scoped names.
@@ -243,10 +247,12 @@ class SymbolExtractor:
         # We probably only want to create nodes for DEFINITIONS, not IMPORTS.
         # So we should keep a version that only returns definitions.
         
-        parser = TreeSitterUtils.get_parser(language)
-        if not parser:
-            return {}
-        tree = parser.parse(bytes(file_content, "utf8"))
+        if tree is None:
+            parser = TreeSitterUtils.get_parser(language)
+            if not parser:
+                return {}
+            tree = parser.parse(bytes(file_content, "utf8"))
+            
         root_node = tree.root_node
         
         definitions = {}
@@ -264,7 +270,7 @@ class SymbolExtractor:
         traverse(root_node)
         return definitions
 
-    def filter_diff_symbols(self, file_content: str, language: str, affected_lines: Set[int], symbol_table: Dict[str, str] = None) -> List[str]:
+    def filter_diff_symbols(self, file_content: str, language: str, affected_lines: Set[int], symbol_table: Dict[str, str] = None, tree=None) -> List[str]:
         """
         Identify symbols that were directly impacted by changes in specific lines.
 
@@ -273,6 +279,7 @@ class SymbolExtractor:
             language (str): The programming language.
             affected_lines (Set[int]): A set of line numbers changed in the diff.
             symbol_table (Dict[str, str], optional): A pre-built symbol table for resolution.
+            tree: Optional tree-sitter Tree.
 
         Returns:
             List[str]: A list of canonical symbol names modified or used in the diff.
@@ -281,22 +288,28 @@ class SymbolExtractor:
         if symbol_table is None:
             symbol_table = {}
             
-        parser = TreeSitterUtils.get_parser(language)
-        if not parser:
-            return []
+        if tree is None:
+            parser = TreeSitterUtils.get_parser(language)
+            if not parser:
+                return []
+            tree = parser.parse(bytes(file_content, "utf8"))
 
-        tree = parser.parse(bytes(file_content, "utf8"))
         root_node = tree.root_node
         
         matched_symbols = set()
-        
+        if not affected_lines:
+            return list(matched_symbols)
+        sorted_affected = sorted(list(affected_lines))
 
         def traverse(node: TSNode, current_scope: str = ""):
             start_line = node.start_point[0] + 1
             end_line = node.end_point[0] + 1
             
-            node_range = set(range(start_line, end_line + 1))
-            intersection = node_range.intersection(affected_lines)
+            if end_line < sorted_affected[0] or start_line > sorted_affected[-1]:
+                return  # Entire subtree is outside the affected range
+                
+            idx = bisect.bisect_left(sorted_affected, start_line)
+            intersects = idx < len(sorted_affected) and sorted_affected[idx] <= end_line
             
             # Update scope if defining
             new_scope = current_scope
@@ -305,7 +318,7 @@ class SymbolExtractor:
                 if name:
                      new_scope = f"{current_scope}.{name}" if current_scope else name
             
-            if intersection:
+            if intersects:
                 # Check for Identifiers (Usages)
                 if node.type == "identifier":
                     name = file_content[node.start_byte:node.end_byte]
@@ -319,31 +332,41 @@ class SymbolExtractor:
                          canonical = f"{current_scope}.{name}" if current_scope else name
                          matched_symbols.add(canonical)
 
-            for child in node.children:
-                traverse(child, new_scope)
+                for child in node.children:
+                    traverse(child, new_scope)
 
         traverse(root_node)
         return list(matched_symbols)
 
-    def extract_modified_functions(self, file_content: str, language: str, affected_lines: Set[int]) -> Dict[str, str]:
+    def extract_modified_functions(self, file_content: str, language: str, affected_lines: Set[int], tree=None) -> Dict[str, str]:
         """
         Identify functions/methods that were directly modified.
         Return their canonical names and source text.
         """
-        parser = TreeSitterUtils.get_parser(language)
-        if not parser:
-            return {}
+        if tree is None:
+            parser = TreeSitterUtils.get_parser(language)
+            if not parser:
+                return {}
+            tree = parser.parse(bytes(file_content, "utf8"))
 
-        tree = parser.parse(bytes(file_content, "utf8"))
         root_node = tree.root_node
         
         modified_functions = {}
+        if not affected_lines:
+            return modified_functions
+            
+        import bisect
+        sorted_affected = sorted(list(affected_lines))
         
         def traverse(node: TSNode, current_scope: str = ""):
             start_line = node.start_point[0] + 1
             end_line = node.end_point[0] + 1
-            node_range = set(range(start_line, end_line + 1))
-            intersection = node_range.intersection(affected_lines)
+            
+            if end_line < sorted_affected[0] or start_line > sorted_affected[-1]:
+                return
+                
+            idx = bisect.bisect_left(sorted_affected, start_line)
+            intersects = idx < len(sorted_affected) and sorted_affected[idx] <= end_line
             
             new_scope = current_scope
             if node.type in self.definition_types:
@@ -351,16 +374,17 @@ class SymbolExtractor:
                 if name:
                     new_scope = f"{current_scope}.{name}" if current_scope else name
                     
-                    if intersection and node.type in self.function_types:
+                    if intersects and node.type in self.function_types:
                         content = file_content[node.start_byte:node.end_byte]
                         modified_functions[new_scope] = content
                         
-            for child in node.children:
-                traverse(child, new_scope)
+            if intersects:
+                for child in node.children:
+                    traverse(child, new_scope)
 
         traverse(root_node)
         return modified_functions
-    def extract_comments(self, file_content: str, language: str, affected_lines: Set[int]) -> List[Tuple[str, str, int]]:
+    def extract_comments(self, file_content: str, language: str, affected_lines: Set[int], tree=None) -> List[Tuple[str, str, int]]:
         """
         Extract docstrings and inline comments that intersect with affected lines.
 
@@ -368,22 +392,34 @@ class SymbolExtractor:
             file_content (str): The source code content.
             language (str): The programming language.
             affected_lines (Set[int]): Lines changed in the current commit.
+            tree: Optional tree-sitter Tree.
 
         Returns:
             List[Tuple[str, str, int]]: A list of (content, type, line_number) tuples.
         """
-        parser = TreeSitterUtils.get_parser(language)
-        if not parser:
-            return []
+        if tree is None:
+            parser = TreeSitterUtils.get_parser(language)
+            if not parser:
+                return []
+            tree = parser.parse(bytes(file_content, "utf8"))
 
-        tree = parser.parse(bytes(file_content, "utf8"))
         root_node = tree.root_node
         comments = []
+        if not affected_lines:
+            return comments
+            
+        import bisect
+        sorted_affected = sorted(list(affected_lines))
 
         def traverse(node: TSNode):
             start_line = node.start_point[0] + 1
             end_line = node.end_point[0] + 1
-            node_range = set(range(start_line, end_line + 1))
+            
+            if end_line < sorted_affected[0] or start_line > sorted_affected[-1]:
+                return
+                
+            idx = bisect.bisect_left(sorted_affected, start_line)
+            intersects = idx < len(sorted_affected) and sorted_affected[idx] <= end_line
             
             is_comment = False
             comment_type = "inline"
@@ -401,7 +437,7 @@ class SymbolExtractor:
 
             # Check for JS/TS docstrings (often inside specific comment formats, but handled via 'comment' usually)
             
-            if is_comment and node_range.intersection(affected_lines):
+            if is_comment and intersects:
                 content = file_content[node.start_byte:node.end_byte].strip()
                 # Clean python strings if docstring
                 if comment_type == "docstring":
@@ -410,8 +446,127 @@ class SymbolExtractor:
                 if content:
                     comments.append((content, comment_type, start_line))
 
-            for child in node.children:
-                traverse(child)
+            if intersects:
+                for child in node.children:
+                    traverse(child)
 
         traverse(root_node)
         return comments
+
+    def extract_all_symbols(self, file_content: str, language: str, tree=None) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """
+        Combined single-traversal extraction of both definitions and full symbol table.
+        Returns (definitions, symbol_table) in one pass instead of two.
+        """
+        if tree is None:
+            parser = TreeSitterUtils.get_parser(language)
+            if not parser:
+                return {}, {}
+            tree = parser.parse(bytes(file_content, "utf8"))
+
+        root_node = tree.root_node
+        definitions = {}
+        symbol_table = {}
+
+        def traverse(node: TSNode, scope: str = ""):
+            if node.type in self.definition_types:
+                name = self._extract_name(node, file_content)
+                if name:
+                    canonical = f"{scope}.{name}" if scope else name
+                    definitions[name] = canonical
+                    symbol_table[name] = canonical
+                    for child in node.children:
+                        traverse(child, canonical)
+                    return
+
+            if node.type in ["import_statement", "import_from_statement"]:
+                imports = self._extract_imports(node, file_content, language)
+                symbol_table.update(imports)
+
+            for child in node.children:
+                traverse(child, scope)
+
+        traverse(root_node)
+        return definitions, symbol_table
+
+    def analyze_diff(self, file_content: str, language: str, affected_lines: Set[int],
+                     symbol_table: Dict[str, str] = None, tree=None) -> Tuple[List[str], Dict[str, str], List[Tuple[str, str, int]]]:
+        """
+        Combined single-traversal analysis of affected lines.
+        Returns (modified_symbols, modified_functions, comments) in one pass instead of three.
+        """
+        empty_result = ([], {}, [])
+        if not affected_lines:
+            return empty_result
+
+        if symbol_table is None:
+            symbol_table = {}
+
+        if tree is None:
+            parser = TreeSitterUtils.get_parser(language)
+            if not parser:
+                return empty_result
+            tree = parser.parse(bytes(file_content, "utf8"))
+
+        root_node = tree.root_node
+        matched_symbols = set()
+        modified_functions = {}
+        comments = []
+        sorted_affected = sorted(list(affected_lines))
+        comment_node_types = {"comment", "line_comment", "block_comment"}
+
+        def traverse(node: TSNode, current_scope: str = ""):
+            start_line = node.start_point[0] + 1
+            end_line = node.end_point[0] + 1
+
+            if end_line < sorted_affected[0] or start_line > sorted_affected[-1]:
+                return
+
+            idx = bisect.bisect_left(sorted_affected, start_line)
+            intersects = idx < len(sorted_affected) and sorted_affected[idx] <= end_line
+
+            new_scope = current_scope
+            if node.type in self.definition_types:
+                name = self._extract_name(node, file_content)
+                if name:
+                    new_scope = f"{current_scope}.{name}" if current_scope else name
+
+            if intersects:
+                # filter_diff_symbols logic
+                if node.type == "identifier":
+                    name = file_content[node.start_byte:node.end_byte]
+                    if name in symbol_table:
+                        matched_symbols.add(symbol_table[name])
+
+                if node.type in self.definition_types:
+                    name = self._extract_name(node, file_content)
+                    if name:
+                        canonical = f"{current_scope}.{name}" if current_scope else name
+                        matched_symbols.add(canonical)
+                        # extract_modified_functions logic
+                        if node.type in self.function_types:
+                            content = file_content[node.start_byte:node.end_byte]
+                            modified_functions[canonical] = content
+
+                # extract_comments logic
+                is_comment = False
+                comment_type = "inline"
+                if node.type in comment_node_types:
+                    is_comment = True
+                elif language == "python" and node.type == "expression_statement":
+                    if len(node.children) == 1 and node.children[0].type == "string":
+                        is_comment = True
+                        comment_type = "docstring"
+
+                if is_comment:
+                    content = file_content[node.start_byte:node.end_byte].strip()
+                    if comment_type == "docstring":
+                        content = content.strip("'\" \n\t")
+                    if content:
+                        comments.append((content, comment_type, start_line))
+
+                for child in node.children:
+                    traverse(child, new_scope)
+
+        traverse(root_node)
+        return list(matched_symbols), modified_functions, comments

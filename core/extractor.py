@@ -10,7 +10,10 @@ import difflib
 import uuid
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+import collections
 from rich.progress import Progress
+import subprocess
+import binascii
 
 from core.graph_store import GraphStore
 from core.schema import Node, Edge, NodeType, EdgeType
@@ -88,9 +91,12 @@ class GraphExtractor:
         """
         Main entry point for graph extraction.
         
-        Iterates through all commits in the repository in topological order (oldest to newest),
-        performing full analysis on each commit and its associated changes.
+        Three-phase process:
+        1. Parse git log for commit metadata + diff info (single subprocess)
+        2. Parallel pre-computation: blob reads, tree parsing, symbol extraction (ThreadPoolExecutor)
+        3. Sequential graph building using cached data (deterministic ordering)
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         repo_node = Node(
             id=str(self.repo_path),
@@ -102,30 +108,325 @@ class GraphExtractor:
         )
         self.store.upsert_node(repo_node)
 
-        commits = list(self.repo.iter_commits(topo_order=True, reverse=True))
+        # ── Phase 1: Unified Git Log Stream ────────────────────────────────
+        commit_order = []
+        commit_meta = {}
+        self.diff_cache = collections.defaultdict(list)
+        
+        log_process = subprocess.Popen(
+            ['git', '-C', str(self.repo_path), 'log', '--no-abbrev', '--raw', '-p', '-U0',
+             '--topo-order', '--reverse',
+             '--format=format:^C^%H|~|%P|~|%aI|~|%an|~|%ae|~|%cI|~|%cn|~|%ce|~|%B^E^'],
+            stdout=subprocess.PIPE, text=True, errors='replace', bufsize=1024*1024
+        )
+        
+        current_commit = None
+        current_diff = None
+        current_diffs = None
+        in_message = False
+        message_buffer = []
 
-        if self.progress is not None and self.task_id is not None:
-            for commit in commits:
-                self._process_commit(commit, repo_node)
-                self.progress.advance(self.task_id)
+        for line in log_process.stdout:
+            if line.startswith('^C^'):
+                # Handle previous diff
+                if current_diff is not None:
+                    current_diff['diff_lines'] = "".join(current_diff['diff_lines'])
+                    current_diffs.append(current_diff)
+                
+                # Parse header
+                raw = line[3:]
+                parts = raw.split('|~|', 8)
+                if len(parts) >= 9:
+                    hexsha = parts[0]
+                    commit_order.append(hexsha)
+                    current_commit = hexsha
+                    current_diff = None
+                    current_diffs = self.diff_cache[current_commit]
+                    
+                    commit_meta[hexsha] = {
+                        'hexsha': hexsha,
+                        'parents': parts[1].split() if parts[1] else [],
+                        'author_date': parts[2],
+                        'author_name': parts[3],
+                        'author_email': parts[4],
+                        'committer_date': parts[5],
+                        'committer_name': parts[6],
+                        'committer_email': parts[7],
+                        'message': parts[8]
+                    }
+                    if '^E^' not in parts[8]:
+                        in_message = True
+                        message_buffer = [parts[8]]
+                    else:
+                        commit_meta[hexsha]['message'] = parts[8].split('^E^')[0].strip()
+                        in_message = False
+                continue
+
+            if in_message:
+                if '^E^' in line:
+                    msg_part = line.split('^E^')[0]
+                    message_buffer.append(msg_part)
+                    commit_meta[current_commit]['message'] = "".join(message_buffer).strip()
+                    in_message = False
+                else:
+                    message_buffer.append(line)
+                continue
+
+            if line.startswith(':'):
+                if current_diff is not None:
+                    current_diff['diff_lines'] = "".join(current_diff['diff_lines'])
+                    current_diffs.append(current_diff)
+                
+                parts = line.strip('\n').split('\t')
+                meta = parts[0].split()
+                if len(meta) >= 5:
+                    status = meta[4]
+                    b_hexsha = meta[3]
+                    if len(parts) == 2:
+                        a_path = parts[1]
+                        b_path = parts[1] if status[0] != 'D' else None
+                    elif len(parts) == 3:
+                        a_path = parts[1]
+                        b_path = parts[2]
+                    else:
+                        a_path = b_path = None
+                        
+                    current_diff = {
+                        'a_path': a_path,
+                        'b_path': b_path,
+                        'change_type': status, 
+                        'b_blob_hexsha': b_hexsha if b_hexsha != '0' * 40 else None,
+                        'diff_lines': []
+                    }
+                else:
+                    current_diff = None
+            elif current_diff is not None:
+                current_diff['diff_lines'].append(line)
+        
+        if current_commit and current_diff is not None:
+            current_diff['diff_lines'] = "".join(current_diff['diff_lines'])
+            current_diffs.append(current_diff)
+            
+        log_process.wait()
+
+        # ── Phase 2: Parallel Pre-computation ──────────────────────────────
+        blob_tasks = []
+        seen_blobs = set()
+        for hexsha in commit_order:
+            for d in self.diff_cache.get(hexsha, []):
+                blob_sha = d.get('b_blob_hexsha')
+                file_path = d.get('b_path') or d.get('a_path')
+                if blob_sha and blob_sha not in seen_blobs and d['change_type'][0] != 'D':
+                    ext = Path(file_path).suffix if file_path else ""
+                    blob_tasks.append((blob_sha, ext))
+                    seen_blobs.add(blob_sha)
+        
+        self.blob_cache = {}
+        self.tree_cache = {}
+        self.symbol_cache = {}
+        
+        import threading
+        odb_lock = threading.Lock()
+        results_lock = threading.Lock()
+        
+        def preprocess_blob(blob_sha, ext):
+            try:
+                with odb_lock:
+                    binsha = binascii.unhexlify(blob_sha)
+                    stream = self.repo.odb.stream(binsha)
+                    content = stream.read().decode('utf-8', errors='replace')
+                
+                language = TreeSitterUtils.map_extension_to_language(ext)
+                tree = None
+                definitions, symbol_table = {}, {}
+                
+                if language:
+                    parser = TreeSitterUtils.get_parser(language)
+                    if parser:
+                        tree = parser.parse(bytes(content, "utf8"))
+                        definitions, symbol_table = self.symbol_extractor.extract_all_symbols(content, language, tree=tree)
+                
+                with results_lock:
+                    self.blob_cache[blob_sha] = content
+                    if tree is not None:
+                        self.tree_cache[blob_sha] = tree
+                    self.symbol_cache[blob_sha] = (definitions, symbol_table)
+            except Exception:
+                pass
+
+        if self.progress is not None:
+            cache_task = self.progress.add_task("[cyan]Pre-caching file data...", total=len(blob_tasks))
+        
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = [executor.submit(preprocess_blob, sha, ext) for sha, ext in blob_tasks]
+            for future in as_completed(futures):
+                future.result()
+                if self.progress is not None:
+                    self.progress.advance(cache_task)
+
+        # ── Phase 3: Sequential graph building ──────────────────────────────
+        if self.progress is not None:
+            graph_task = self.progress.add_task("[green]Building graph...", total=len(commit_order))
+            for hexsha in commit_order:
+                self._process_commit_fast(commit_meta[hexsha], repo_node)
+                self.progress.advance(graph_task)
         else:
             from rich.progress import Progress
             from rich.console import Console
             stderr_console = Console(file=sys.stderr)
             
             with Progress(console=stderr_console) as progress:
-                task = progress.add_task("[green]Processing commits...", total=len(commits))
+                task = progress.add_task("[green]Building graph...", total=len(commit_order))
                 
-                for commit in commits:
-                    self._process_commit(commit, repo_node)
+                for hexsha in commit_order:
+                    self._process_commit_fast(commit_meta[hexsha], repo_node)
                     progress.advance(task)
             
         # Second pass: Process major keywords
         self._process_keywords()
+        self.store.finalize()
+
+    def _process_commit_fast(self, meta: dict, repo_node: Node) -> None:
+        """
+        Process a commit using pre-parsed metadata dict (no GitPython overhead).
+        """
+        hexsha = meta['hexsha']
+        message = meta['message']
+        author_name = meta['author_name']
+        author_email = meta['author_email']
+        author_date = meta['author_date']
+        committer_name = meta['committer_name']
+        committer_email = meta['committer_email']
+        committer_date = meta['committer_date']
+        parents = meta['parents']
+
+        commit_node = Node(
+            id=hexsha,
+            type=NodeType.COMMIT,
+            attributes={
+                "message": message,
+                "timestamp": author_date,
+                "author_name": author_name,
+                "author_email": author_email,
+                "committer_name": committer_name,
+                "committer_email": committer_email,
+                "committer_date": committer_date,
+                "parents": parents
+            }
+        )
+        self.store.upsert_node(commit_node)
+
+        self.store.upsert_edge(Edge(
+            source_id=commit_node.id,
+            target_id=repo_node.id,
+            type=EdgeType.PART_OF_REPO
+        ))
+
+        # Handle parents
+        for p_sha in parents:
+            self.store.upsert_edge(Edge(
+                source_id=commit_node.id,
+                target_id=p_sha,
+                type=EdgeType.PARENT_OF, # Note: id -> parent means id is child
+                attributes={}
+            ))
+
+        msg_id = hashlib.sha256(message.encode()).hexdigest()
+        msg_node = Node(
+            id=f"MSG:{msg_id}",
+            type=NodeType.COMMIT_MESSAGE,
+            attributes={"content": message}
+        )
+        self.store.upsert_node(msg_node)
+
+        author_node = Node(
+            id=author_email,
+            type=NodeType.AUTHOR,
+            attributes={"name": author_name}
+        )
+        self.store.upsert_node(author_node)
+
+        committer_node = Node(
+            id=committer_email,
+            type=NodeType.AUTHOR, # Reuse AUTHOR type for person
+            attributes={"name": committer_name}
+        )
+        self.store.upsert_node(committer_node)
+
+        # Parse date for time bucket (ISO format: 2024-01-15T10:30:00+00:00)
+        try:
+            date_part = author_date[:10]  # "2024-01-15"
+            year = int(date_part[:4])
+            month = int(date_part[5:7])
+        except (ValueError, IndexError):
+            year, month = 2000, 1
+            
+        time_bucket_id = f"{year}-{month:02d}"
+        time_node = Node(
+            id=time_bucket_id,
+            type=NodeType.TIME_BUCKET,
+            attributes={"year": year, "month": month}
+        )
+        self.store.upsert_node(time_node)
+
+        # Build list of related things for plugins
+        related_nodes = [msg_node, author_node, committer_node, time_node, repo_node]
+        related_edges = [
+            Edge(commit_node.id, msg_node.id, EdgeType.HAS_MESSAGE),
+            Edge(commit_node.id, repo_node.id, EdgeType.PART_OF_REPO),
+            Edge(commit_node.id, author_node.id, EdgeType.AUTHORED_BY),
+            Edge(commit_node.id, committer_node.id, EdgeType.COMMITTED_BY),
+            Edge(commit_node.id, time_node.id, EdgeType.OCCURRED_IN)
+        ]
+
+        for re in related_edges:
+            self.store.upsert_edge(re)
+
+        # First pass keyword collection
+        keywords = self.keyword_extractor.extract_keywords(message)
+        for kw in keywords:
+            self.term_counts[kw] += 1
+            self.term_to_nodes[kw].add(commit_node.id)
+
+        raw_diffs = self.diff_cache.get(hexsha, [])
+        for diff_data in raw_diffs:
+            self._process_diff_item(diff_data, commit_node)
+
+        related_nodes = [msg_node, author_node, time_node, repo_node]
+        related_edges = [
+            Edge(commit_node.id, msg_node.id, EdgeType.HAS_MESSAGE),
+            Edge(commit_node.id, repo_node.id, EdgeType.PART_OF_REPO),
+            Edge(commit_node.id, author_node.id, EdgeType.AUTHORED_BY),
+            Edge(commit_node.id, time_node.id, EdgeType.OCCURRED_IN)
+        ]
+        
+        api = GraphAPIWrapper(self.store)
+        
+        for plugin in self.plugins:
+            try:
+                config = {}
+                module_name = plugin.__module__
+                
+                if module_name.startswith("gdskg_plugin_"):
+                    potential_name = module_name.replace("gdskg_plugin_", "")
+                    config = self.plugin_config.get(potential_name, {})
+                elif "plugins." in module_name:
+                    try:
+                        parts = module_name.split('.')
+                        idx = parts.index("plugins")
+                        if idx + 1 < len(parts):
+                            potential_name = parts[idx+1]
+                            config = self.plugin_config.get(potential_name, {})
+                    except:
+                        pass
+
+                plugin.process(commit_node, related_nodes, related_edges, api, config)
+            except Exception as e:
+                print(f"Error executing plugin {plugin}: {e}")
 
     def _process_commit(self, commit: git.Commit, repo_node: Node) -> None:
         """
-        Process a specific Git commit and metadata.
+        Process a specific Git commit and metadata (legacy method).
 
         Args:
             commit (git.Commit): The GitPython Commit object to analyze.
@@ -196,15 +497,9 @@ class GraphExtractor:
             self.term_counts[kw] += 1
             self.term_to_nodes[kw].add(commit_node.id)
 
-        parent = commit.parents[0] if commit.parents else None
-        
-        if parent:
-            diffs = parent.diff(commit, create_patch=True)
-        else:
-            diffs = commit.diff(git.NULL_TREE, create_patch=True)
-        
-        for diff in diffs:
-            self._process_diff_item(diff, commit_node)
+        raw_diffs = self.diff_cache.get(commit.hexsha, [])
+        for diff_data in raw_diffs:
+            self._process_diff_item(diff_data, commit_node)
 
         related_nodes = [msg_node, author_node, time_node, repo_node]
         related_edges = [
@@ -238,19 +533,19 @@ class GraphExtractor:
             except Exception as e:
                 print(f"Error executing plugin {plugin}: {e}")
 
-    def _process_diff_item(self, diff: git.Diff, commit_node: Node) -> None:
+    def _process_diff_item(self, diff_data: dict, commit_node: Node) -> None:
         """
         Analyze a specific file change (diff) within a commit.
 
-        This involves identifying file metadata, performing symbol extraction,
-        diff filtering, and secret scanning on the file content.
+        Uses pre-cached blob content, parsed trees, and extracted symbols
+        from the parallel pre-computation phase.
 
         Args:
-            diff (git.Diff): The GitPython Diff object representing the change.
+            diff_data (dict): Raw diff dict with keys: a_path, b_path, change_type, b_blob_hexsha, diff_lines
             commit_node (Node): The node representing the current commit.
         """
 
-        file_path = diff.b_path if diff.b_path else diff.a_path
+        file_path = diff_data.get('b_path') or diff_data.get('a_path')
         if not file_path:
             return
 
@@ -267,29 +562,38 @@ class GraphExtractor:
             self.term_counts[fkw] += 1
             self.term_to_nodes[fkw].add(file_node.id)
 
-        
+        edge_attributes = {"change_type": diff_data['change_type']}
+        if diff_data.get('a_path') and diff_data.get('a_path') != file_path:
+            edge_attributes["source_path"] = diff_data['a_path']
+
         self.store.upsert_edge(Edge(
             source_id=commit_node.id,
             target_id=file_node.id,
             type=EdgeType.MODIFIED_FILE,
-            attributes={"change_type": diff.change_type}
+            attributes=edge_attributes
         ))
 
-        if diff.change_type == 'D':
+        if diff_data['change_type'][0] == 'D':
             return
-            # Skip analysis for deleted files -- no more insights to glean
-            # that have not already been gleaned
 
         try:
-            blob = diff.b_blob
-            if not blob:
+            blob_sha = diff_data.get('b_blob_hexsha')
+            if not blob_sha:
                 return
                 
-            content = blob.data_stream.read().decode('utf-8', errors='replace')
-            language = TreeSitterUtils.map_extension_to_language(file_node.attributes["extension"])
+            # Use pre-cached blob content
+            content = self.blob_cache.get(blob_sha)
+            if content is None:
+                return
+            
+            extension = file_node.attributes["extension"]
+            language = TreeSitterUtils.map_extension_to_language(extension)
             
             if language:
-                definitions = self.symbol_extractor.extract_symbols(content, language)
+                # Use pre-cached tree and symbols
+                tree = self.tree_cache.get(blob_sha)
+                cached_symbols = self.symbol_cache.get(blob_sha, ({}, {}))
+                definitions, full_symbol_table = cached_symbols
 
                 for name, canonical in definitions.items():
                     symbol_node = Node(
@@ -311,11 +615,9 @@ class GraphExtractor:
                         self.term_counts[skw] += 1
                         self.term_to_nodes[skw].add(symbol_node.id)
                 
-                full_symbol_table = self.symbol_extractor.build_symbol_table(content, language)
-                
                 affected_lines = set()
 
-                patch = diff.diff.decode('utf-8', errors='replace') if isinstance(diff.diff, bytes) else diff.diff
+                patch = diff_data['diff_lines']
                 
                 # Parse patch for line numbers and hunk keywords
                 current_line = 0
@@ -340,12 +642,13 @@ class GraphExtractor:
                     self.term_to_nodes[hkw].add(commit_node.id)
                 
                 if affected_lines:
-                    # Pass full_symbol_table to resolve identifiers in the hunks
-                    modified_symbols = self.symbol_extractor.filter_diff_symbols(content, language, affected_lines, full_symbol_table)
+                    # Combined traversal 2: diff symbols + modified functions + comments in one pass
+                    modified_symbols, modified_funcs, comments = self.symbol_extractor.analyze_diff(
+                        content, language, affected_lines, full_symbol_table, tree=tree
+                    )
+                    
                     for sym_name in modified_symbols:
-                        self.store.upsert_symbol(sym_name, file_path) # Ensure it exists (if from import? maybe skipping if external?)
-                        # If sym_name comes from 'import os', upsert_symbol creates a node 'os'. 
-                        # This satisfies "connect symbols".
+                        self.store.upsert_symbol(sym_name, file_path)
                         self.store.upsert_edge(Edge(
                             source_id=sym_name,
                             target_id=commit_node.id,
@@ -353,7 +656,6 @@ class GraphExtractor:
                         ))
                     
                     # Extract function versions
-                    modified_funcs = self.symbol_extractor.extract_modified_functions(content, language, affected_lines)
                     for func_name, func_content in modified_funcs.items():
                         func_node = Node(id=func_name, type=NodeType.FUNCTION, attributes={"name": func_name})
                         self.store.upsert_node(func_node)
@@ -367,9 +669,18 @@ class GraphExtractor:
                         best_candidate = None
                         best_score = -1
                         
+                        len_a = len(func_content)
                         for candidate in candidates:
+                            is_same_file = candidate['last_file'] == file_path
+                            len_b = len(candidate['last_content'])
+                            max_similarity = 2.0 * min(len_a, len_b) / (len_a + len_b) if (len_a + len_b) > 0 else 1.0
+                            
+                            max_possible_score = max_similarity + (1.0 if is_same_file else 0.0)
+                            if max_possible_score <= best_score:
+                                continue
+                                
                             similarity = difflib.SequenceMatcher(None, func_content, candidate['last_content']).quick_ratio()
-                            score = similarity + (1.0 if candidate['last_file'] == file_path else 0.0)
+                            score = similarity + (1.0 if is_same_file else 0.0)
                             
                             if score > best_score:
                                 best_score = score
@@ -427,32 +738,30 @@ class GraphExtractor:
                             ))
                         best_candidate['last_version_id'] = version_node.id
                 
-                # Extract and attach comments/docstrings
-                comments = self.symbol_extractor.extract_comments(content, language, affected_lines)
-                for comment_text, comment_type, line_num in comments:
-                    # Deterministic ID for comments within a file/commit
-                    comment_hash = hashlib.sha256(f"{file_path}:{line_num}:{comment_text}".encode()).hexdigest()[:12]
-                    comment_node = Node(
-                        id=f"COMMENT:{comment_hash}",
-                        type=NodeType.COMMENT,
-                        attributes={
-                            "content": comment_text,
-                            "type": comment_type,
-                            "file": file_path,
-                            "line": line_num
-                        }
-                    )
-                    self.store.upsert_node(comment_node)
-                    self.store.upsert_edge(Edge(
-                        source_id=comment_node.id,
-                        target_id=commit_node.id,
-                        type=EdgeType.HAS_COMMENT
-                    ))
-                    self.store.upsert_edge(Edge(
-                        source_id=file_node.id,
-                        target_id=comment_node.id,
-                        type=EdgeType.CONTAINS_COMMENT
-                    ))
+                    # Process comments from combined traversal
+                    for comment_text, comment_type, line_num in comments:
+                        comment_hash = hashlib.sha256(f"{file_path}:{line_num}:{comment_text}".encode()).hexdigest()[:12]
+                        comment_node = Node(
+                            id=f"COMMENT:{comment_hash}",
+                            type=NodeType.COMMENT,
+                            attributes={
+                                "content": comment_text,
+                                "type": comment_type,
+                                "file": file_path,
+                                "line": line_num
+                            }
+                        )
+                        self.store.upsert_node(comment_node)
+                        self.store.upsert_edge(Edge(
+                            source_id=comment_node.id,
+                            target_id=commit_node.id,
+                            type=EdgeType.HAS_COMMENT
+                        ))
+                        self.store.upsert_edge(Edge(
+                            source_id=file_node.id,
+                            target_id=comment_node.id,
+                            type=EdgeType.CONTAINS_COMMENT
+                        ))
 
             secrets = self.secret_scanner.scan(content)
             for secret in secrets:
