@@ -338,11 +338,15 @@ def query(
                         detail.append(pr, style=color)
                         detail.append("\n")
                 else:
-                    # Show up to 5 nodes per type
                     node_names = [Path(n).name if ntype == NodeType.FILE.value else n for n in nodes]
-                    detail.append(", ".join(node_names[:5]), style=color)
-                    if len(node_names) > 5:
-                        detail.append(f" (+{len(node_names)-5} more)", style=f"dim {color}")
+                    
+                    if ntype == NodeType.KEYWORD.value:
+                        detail.append(", ".join(node_names[:5]), style=color)
+                        if len(node_names) > 5:
+                            detail.append(f" (+{len(node_names)-5} more)", style=f"dim {color}")
+                    else:
+                        detail.append(", ".join(node_names), style=color)
+                        
                     detail.append("\n")
 
         table.add_row(

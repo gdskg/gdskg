@@ -173,10 +173,14 @@ def query_knowledge_graph(
                 
                 for ntype, nodes in grouped.items():
                     display_nodes = [Path(n).name if ntype == NodeType.FILE.value else n for n in nodes]
-                    output += f"     - {ntype}: {', '.join(display_nodes[:3])}"
-
-                    if len(display_nodes) > 3:
-                        output += f" (+{len(display_nodes)-3} more)"
+                    
+                    if ntype == NodeType.KEYWORD.value:
+                        output += f"     - {ntype}: {', '.join(display_nodes[:3])}"
+                        if len(display_nodes) > 3:
+                            output += f" (+{len(display_nodes)-3} more)"
+                    else:
+                        output += f"     - {ntype}: {', '.join(display_nodes)}"
+                        
                     output += "\n"
             
             output += "\n"
