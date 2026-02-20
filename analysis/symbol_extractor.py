@@ -22,7 +22,8 @@ class SymbolExtractor:
             "class_definition", 
             "method_definition",
             "lexical_declaration",
-            "variable_declaration"
+            "variable_declaration",
+            "function_declaration"
         }
         self.function_types = {
             "function_definition",
@@ -59,6 +60,23 @@ class SymbolExtractor:
              name_node = node.child_by_field_name("name")
              if name_node:
                  return content[name_node.start_byte:name_node.end_byte]
+                 
+        # 4. For C/C++ function_definition, name is nested in declarator
+        if node.type == "function_definition":
+             declarator_node = node.child_by_field_name("declarator")
+             if declarator_node:
+                 if declarator_node.type == "function_declarator":
+                     inner_dec = declarator_node.child_by_field_name("declarator")
+                     if inner_dec:
+                         return content[inner_dec.start_byte:inner_dec.end_byte]
+                 else:
+                     return content[declarator_node.start_byte:declarator_node.end_byte]
+        
+        # 5. For React arrow components exporting directly e.g. export const Button
+        if node.type == "export_statement":
+             declaration_node = node.child_by_field_name("declaration")
+             if declaration_node:
+                 return self._extract_name(declaration_node, content)
                  
         return None
 

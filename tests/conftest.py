@@ -25,6 +25,15 @@ def setup_test_repos():
     # Generate TypeScript Repo
     subprocess.run([sys.executable, str(gen_script), "typescript-repo"], check=True)
     
+    # Generate React Repo
+    subprocess.run([sys.executable, str(gen_script), "react-repo"], check=True)
+    
+    # Generate C Repo
+    subprocess.run([sys.executable, str(gen_script), "c-repo"], check=True)
+    
+    # Generate Misc Repo
+    subprocess.run([sys.executable, str(gen_script), "misc-repo"], check=True)
+    
     yield
     
     print("\n[teardown] Destroying test repositories...")
