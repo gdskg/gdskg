@@ -403,6 +403,8 @@ class GraphExtractor:
         api = GraphAPIWrapper(self.store)
         
         for plugin in self.plugins:
+            if getattr(plugin, 'plugin_type', 'build') != 'build':
+                continue
             try:
                 config = {}
                 module_name = plugin.__module__
@@ -512,6 +514,8 @@ class GraphExtractor:
         api = GraphAPIWrapper(self.store)
         
         for plugin in self.plugins:
+            if getattr(plugin, 'plugin_type', 'build') != 'build':
+                continue
             try:
                 config = {}
                 module_name = plugin.__module__

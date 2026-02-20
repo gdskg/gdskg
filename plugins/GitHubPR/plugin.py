@@ -10,6 +10,8 @@ from core.schema import Node, Edge, NodeType
 logger = logging.getLogger(__name__)
 
 class GitHubPlugin(PluginInterface):
+    plugin_type = "runtime"
+    
     def __init__(self):
         self.pat = os.environ.get("GITHUB_PAT")
         self.enabled = True
