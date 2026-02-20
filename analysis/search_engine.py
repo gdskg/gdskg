@@ -1,7 +1,7 @@
 import sqlite3
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Set
+from typing import List, Dict, Any, Set, Optional
 from core.schema import NodeType, EdgeType
 
 class SearchEngine:
@@ -65,86 +65,78 @@ class SearchEngine:
 
             for kw in keywords:
 
-                # 1. Search COMMIT nodes
+                # 1. Search COMMIT nodes directly (message/id)
                 cursor.execute("""
                     SELECT id, attributes FROM nodes 
-                    WHERE type = ? AND (id LIKE ? OR attributes LIKE ?)
+                    WHERE type = ? AND (id LIKE ? OR json_extract(attributes, '$.message') LIKE ?)
                 """, (NodeType.COMMIT.value, f"%{kw}%", f"%{kw}%"))
                 for row in cursor.fetchall():
                     commit_id, attr_json = row
-                    
-                    if repo_ids:
+                    self._ensure_commit_in_results(commits, commit_id, attr_json, repo_ids, cursor)
+                    if commit_id in commits:
+                        commits[commit_id]["relevance"] += 10
+                        commits[commit_id]["reasons"].append(f"Keyword '{kw}' found in commit metadata")
 
-                        cursor.execute("""
-                            SELECT 1 FROM edges 
-                            WHERE source_id = ? AND target_id IN (%s) AND type = ?
-                        """ % ",".join("?" * len(repo_ids)), (commit_id, *repo_ids, EdgeType.PART_OF_REPO.value))
-                        if not cursor.fetchone():
-                            continue
-
-                    if commit_id not in commits:
-                        attrs = json.loads(attr_json)
-                        commits[commit_id] = {
-                            "id": commit_id,
-                            "message": attrs.get("message", "No message"),
-                            "author": attrs.get("author_name", attrs.get("author", "Unknown")),
-                            "date": attrs.get("timestamp", attrs.get("date", "Unknown")),
-                            "relevance": 0,
-                            "connections": {}
-                        }
-
-                    commits[commit_id]["relevance"] += 10
-
+                # 2. Search via KEYWORD nodes
                 cursor.execute("""
-                    SELECT id, type FROM nodes 
-                    WHERE (type = ? OR type = ? OR type = ? OR type = ?) AND (id LIKE ? OR attributes LIKE ?)
-                """, (NodeType.SYMBOL.value, NodeType.FILE.value, NodeType.COMMIT_MESSAGE.value, NodeType.COMMENT.value, f"%{kw}%", f"%{kw}%"))
+                    SELECT n.id, n.attributes FROM nodes n
+                    JOIN edges e ON n.id = e.source_id
+                    JOIN nodes k ON e.target_id = k.id
+                    WHERE n.type = ? AND k.type = ? AND k.id = ?
+                """, (NodeType.COMMIT.value, NodeType.KEYWORD.value, f"KEYWORD:{kw}"))
+                for row in cursor.fetchall():
+                    commit_id, attr_json = row
+                    self._ensure_commit_in_results(commits, commit_id, attr_json, repo_ids, cursor)
+                    if commit_id in commits:
+                        commits[commit_id]["relevance"] += 8
+                        reasons = commits[commit_id]["reasons"]
+                        if f"Significant keyword '{kw}' found in change hunks" not in reasons:
+                            reasons.append(f"Significant keyword '{kw}' found in change hunks")
+
+                # 3. Search other node types
+                cursor.execute("""
+                    SELECT id, type, attributes FROM nodes 
+                    WHERE 
+                      (type = ? AND (id LIKE ? OR json_extract(attributes, '$.name') LIKE ?)) OR
+                      (type = ? AND id LIKE ?) OR
+                      (type = ? AND json_extract(attributes, '$.content') LIKE ?) OR
+                      (type = ? AND json_extract(attributes, '$.content') LIKE ?)
+                """, (
+                    NodeType.SYMBOL.value, f"%{kw}%", f"%{kw}%",
+                    NodeType.FILE.value, f"%{kw}%",
+                    NodeType.COMMIT_MESSAGE.value, f"%{kw}%",
+                    NodeType.COMMENT.value, f"%{kw}%"
+                ))
                 
                 matched_rows = cursor.fetchall()
-                for node_id, n_type in matched_rows:
+                for node_id, n_type, n_attr_json in matched_rows:
                     if n_type == NodeType.COMMIT_MESSAGE.value:
-                        # Follow HAS_MESSAGE back to COMMIT (target is message, source is commit)
                         cursor.execute("""
                             SELECT source_id FROM edges 
                             WHERE target_id = ? AND type = ?
                         """, (node_id, EdgeType.HAS_MESSAGE.value))
+                        reason = f"Keyword '{kw}' found in commit message"
                     elif n_type == NodeType.COMMENT.value:
-                        # Follow HAS_COMMENT back to COMMIT (target is commit, source is comment)
                         cursor.execute("""
                             SELECT target_id FROM edges 
                             WHERE source_id = ? AND type = ?
                         """, (node_id, EdgeType.HAS_COMMENT.value))
+                        reason = f"Keyword '{kw}' found in code comment"
                     else:
                         cursor.execute("""
                             SELECT target_id FROM edges 
                             WHERE source_id = ? AND (type = ? OR type = ?)
                         """, (node_id, EdgeType.MODIFIED_SYMBOL.value, EdgeType.MODIFIED_FILE.value))
+                        label = "symbol" if n_type == NodeType.SYMBOL.value else "file"
+                        reason = f"Keyword '{kw}' found in {label} '{node_id}'"
                     
                     linked_commits = [r[0] for r in cursor.fetchall()]
                     for cid in linked_commits:
-                        if repo_ids:
-
-                            cursor.execute("""
-                                SELECT 1 FROM edges 
-                                WHERE source_id = ? AND target_id IN (%s) AND type = ?
-                            """ % ",".join("?" * len(repo_ids)), (cid, *repo_ids, EdgeType.PART_OF_REPO.value))
-                            if not cursor.fetchone():
-                                continue
-
-                        if cid not in commits:
-                            cursor.execute("SELECT attributes FROM nodes WHERE id = ?", (cid,))
-                            c_row = cursor.fetchone()
-                            if c_row:
-                                c_attrs = json.loads(c_row[0])
-                                commits[cid] = {
-                                    "id": cid,
-                                    "message": c_attrs.get("message", "No message"),
-                                    "author": c_attrs.get("author_name", c_attrs.get("author", "Unknown")),
-                                    "date": c_attrs.get("timestamp", c_attrs.get("date", "Unknown")),
-                                    "relevance": 0,
-                                    "connections": {}
-                                }
-                        commits[cid]["relevance"] += 5
+                        self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
+                        if cid in commits:
+                            commits[cid]["relevance"] += 5
+                            if reason not in commits[cid]["reasons"]:
+                                commits[cid]["reasons"].append(reason)
 
             if depth > 0:
 
@@ -198,3 +190,34 @@ class SearchEngine:
         result = list(commits.values())
         result.sort(key=lambda x: x["relevance"], reverse=True)
         return result
+    def _ensure_commit_in_results(self, commits: Dict, commit_id: str, attr_json: Optional[str], repo_ids: Set[str], cursor: sqlite3.Cursor):
+        """Helper to check repo visibility and initialize commit in results if missing."""
+        if commit_id in commits:
+            return
+
+        if repo_ids:
+            cursor.execute("""
+                SELECT 1 FROM edges 
+                WHERE source_id = ? AND target_id IN (%s) AND type = ?
+            """ % ",".join("?" * len(repo_ids)), (commit_id, *repo_ids, EdgeType.PART_OF_REPO.value))
+            if not cursor.fetchone():
+                return
+
+        if not attr_json:
+            cursor.execute("SELECT attributes FROM nodes WHERE id = ?", (commit_id,))
+            row = cursor.fetchone()
+            if row:
+                attr_json = row[0]
+            else:
+                return
+
+        attrs = json.loads(attr_json)
+        commits[commit_id] = {
+            "id": commit_id,
+            "message": attrs.get("message", "No message"),
+            "author": attrs.get("author_name", attrs.get("author", "Unknown")),
+            "date": attrs.get("timestamp", attrs.get("date", "Unknown")),
+            "relevance": 0,
+            "connections": {},
+            "reasons": []
+        }

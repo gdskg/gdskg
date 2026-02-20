@@ -208,6 +208,14 @@ def query(
         detail.append(f"Date: ", style="dim")
         detail.append(f"{res['date'][:10]}\n", style="green")
 
+        if res.get('reasons'):
+            detail.append("Matched because:\n", style="bold cyan")
+            for reason in res['reasons'][:3]: # Show top 3 reasons
+                detail.append(f" • {reason}\n", style="dim cyan")
+            if len(res['reasons']) > 3:
+                detail.append(f" • (+{len(res['reasons'])-3} more reasons)\n", style="dim cyan")
+            detail.append("\n")
+
         if depth > 0:
             # Group connections by type
             from core.schema import NodeType

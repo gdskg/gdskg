@@ -304,8 +304,9 @@ class GraphExtractor:
 
                 patch = diff.diff.decode('utf-8', errors='replace') if isinstance(diff.diff, bytes) else diff.diff
                 
-                # Parse patch for line numbers
+                # Parse patch for line numbers and hunk keywords
                 current_line = 0
+                added_lines_content = []
                 for line in patch.splitlines():
                     if line.startswith('@@'):
                         m = re.search(r'\+(\d+)(?:,(\d+))?', line)
@@ -313,9 +314,17 @@ class GraphExtractor:
                             current_line = int(m.group(1))
                     elif line.startswith('+') and not line.startswith('+++'):
                         affected_lines.add(current_line)
+                        added_lines_content.append(line[1:]) # Strip '+'
                         current_line += 1
                     elif not line.startswith('-') and not line.startswith('---'):
                          current_line += 1
+                
+                # Extract keywords from the hunk content
+                hunk_text = " ".join(added_lines_content)
+                hunk_keywords = self.keyword_extractor.extract_keywords(hunk_text, is_code=True)
+                for hkw in hunk_keywords:
+                    self.term_counts[hkw] += 1
+                    self.term_to_nodes[hkw].add(commit_node.id)
                 
                 if affected_lines:
                     # Pass full_symbol_table to resolve identifiers in the hunks
