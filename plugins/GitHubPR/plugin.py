@@ -13,11 +13,10 @@ class GitHubPlugin(PluginInterface):
     plugin_type = "runtime"
     
     def __init__(self):
-        self.pat = os.environ.get("GITHUB_PAT")
+        self.pat = os.environ.get("GITHUB_PAT") or os.environ.get("GITHUB_TOKEN")
         self.enabled = True
         if not self.pat:
-            logger.warning("[GitHubPlugin] GITHUB_PAT environment variable not found. Plugin disabled.")
-            self.enabled = False
+            logger.info("[GitHubPlugin] GITHUB_PAT/GITHUB_TOKEN not found. Running in unauthenticated mode (rate limited).")
         else:
             logger.info("[GitHubPlugin] Initialized with PAT.")
         
@@ -28,6 +27,10 @@ class GitHubPlugin(PluginInterface):
     def process(self, commit_node: Node, related_nodes: List[Node], related_edges: List[Edge], graph_api: GraphInterface, config: Dict[str, Any] = None) -> None:
         if not self.enabled:
             return
+            
+        # Optional manual config token
+        if config and "token" in config and not self.pat:
+            self.pat = config["token"]
 
         # 1. Identify Repository Remote URL
         repo_node = next((n for n in related_nodes if n.type == NodeType.REPOSITORY or str(n.type) == "REPOSITORY"), None)
@@ -56,6 +59,9 @@ class GitHubPlugin(PluginInterface):
         matches = re.findall(r"#(\d+)", message)
         
         for pr_num in matches:
+            pr_node_id = f"PR:{owner}/{repo}#{pr_num}"
+            if any(n.id == pr_node_id for n in related_nodes):
+                continue
             self._process_pr(owner, repo_name, pr_num, commit_node, graph_api)
 
     def _parse_remote(self, remote_url: str) -> tuple[Optional[str], Optional[str]]:
@@ -81,9 +87,11 @@ class GitHubPlugin(PluginInterface):
             # Fetch from GitHub API
             url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
             headers = {
-                "Authorization": f"token {self.pat}",
                 "Accept": "application/vnd.github.v3+json"
             }
+            if self.pat:
+                headers["Authorization"] = f"token {self.pat}"
+                
             try:
                 response = requests.get(url, headers=headers)
                 if response.status_code == 200:
@@ -91,6 +99,7 @@ class GitHubPlugin(PluginInterface):
                     pr_data = {
                         "number": data.get("number"),
                         "title": data.get("title"),
+                        "body": data.get("body"), # ADDED PR DESCRIPTION
                         "state": data.get("state"),
                         "url": data.get("html_url"),
                         "author": data.get("user", {}).get("login"),

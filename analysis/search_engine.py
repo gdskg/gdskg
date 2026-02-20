@@ -24,7 +24,7 @@ class SearchEngine:
         self.db_path = db_path
         self.vector_db_path = vector_db_path or db_path
 
-    def search(self, query: str, repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False) -> List[Dict[str, Any]]:
+    def search(self, query: str, repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5) -> List[Dict[str, Any]]:
         """
         Search for relevant commits based on keywords and traverse the graph.
 
@@ -191,9 +191,15 @@ class SearchEngine:
                 except Exception as e:
                     print(f"Warning: Vector search failed: {e}")
 
+            # Filter and sort base commits here so depth traversal only processes top records
+            sorted_commits = [r for r in commits.values() if r["relevance"] >= min_score]
+            sorted_commits.sort(key=lambda x: x["relevance"], reverse=True)
+            top_commits = sorted_commits[:top_n]
+
             if depth > 0:
 
-                for cid in commits:
+                for cdict in top_commits:
+                    cid = cdict["id"]
                     queue = [(cid, 0)]
                     visited = {cid}
 
@@ -220,7 +226,7 @@ class SearchEngine:
                                 if n_row:
                                     n_type, n_attrs_json = n_row
                                     n_attrs = json.loads(n_attrs_json) if n_attrs_json else {}
-                                    commits[cid]["connections"][neighbor_id] = {
+                                    cdict["connections"][neighbor_id] = {
                                         "type": n_type,
                                         "distance": dist + 1,
                                         "attributes": n_attrs
@@ -239,10 +245,7 @@ class SearchEngine:
                                         
                                     queue.append((neighbor_id, dist + 1))
 
-        # Sort by relevance
-        result = list(commits.values())
-        result.sort(key=lambda x: x["relevance"], reverse=True)
-        return result
+        return top_commits
     def _ensure_commit_in_results(self, commits: Dict, commit_id: str, attr_json: Optional[str], repo_ids: Set[str], cursor: sqlite3.Cursor):
         """Helper to check repo visibility and initialize commit in results if missing."""
         if commit_id in commits:

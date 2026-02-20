@@ -99,6 +99,9 @@ def query_knowledge_graph(
     depth: int = 1,
     traverse_types: Optional[List[str]] = None,
     repo_name: Optional[str] = None,
+    semantic_only: bool = False,
+    min_score: float = 0.0,
+    top_n: int = 5,
     plugins: Optional[List[str]] = None,
     parameters: Optional[List[str]] = None,
 ) -> str:
@@ -112,6 +115,9 @@ def query_knowledge_graph(
         depth: Traversal depth for finding related nodes (0=direct matches only, 1=immediate neighbors, 2+=deeper). Default 1.
         traverse_types: Optional list of node types to traverse through (e.g., ['File', 'Symbol']). Restricts which relationship types are followed during depth search.
         repo_name: Optional repository name to scope the search to.
+        semantic_only: If True, uses semantic search exclusively and ignores keywords.
+        min_score: Minimum relevance score to include in results.
+        top_n: Maximum number of base commits to return.
         plugins: Optional list of plugins to enable (e.g., ['GitHubPR']).
         parameters: Optional list of plugin parameters in format 'PluginName:Key=Value'.
         
@@ -132,91 +138,15 @@ def query_knowledge_graph(
         from core.schema import NodeType
 
         searcher = SearchEngine(str(db_path))
-        results = searcher.search(query, repo_name=repo_name, depth=depth, traverse_types=traverse_types)
+        results = searcher.search(query, repo_name=repo_name, depth=depth, traverse_types=traverse_types, semantic_only=semantic_only, min_score=min_score, top_n=top_n)
         
         if plugins and results:
-            from core.graph_store import GraphStore
-            from core.plugin_manager import PluginManager
-            from core.extractor import GraphAPIWrapper
-            from core.schema import Node, Edge
-            import sqlite3
-            import json
+            from core.plugin_manager import run_runtime_plugins
+            commit_ids = [res['id'] for res in results[:limit]]
+            run_runtime_plugins(str(db_path), commit_ids, plugins, parameters)
 
-            plugin_manager = PluginManager()
-            try:
-                plugin_manager.load_plugins(plugins)
-            except Exception as e:
-                return f"Error loading plugins: {e}"
-
-            loaded_plugins = [p for p in plugin_manager.get_plugins() if getattr(p, 'plugin_type', 'build') == 'runtime']
-
-            if loaded_plugins:
-                store = GraphStore(db_path)
-                api = GraphAPIWrapper(store)
-                plugin_config = {}
-
-                if parameters:
-                    for param in parameters:
-                        try:
-                            if ":" in param and "=" in param:
-                                plugin_part, rest = param.split(":", 1)
-                                key, value = rest.split("=", 1)
-                                if plugin_part not in plugin_config:
-                                    plugin_config[plugin_part] = {}
-                                plugin_config[plugin_part][key] = value
-                        except Exception:
-                            pass 
-
-                with sqlite3.connect(db_path) as conn:
-                    cursor = conn.cursor()
-                    for res in results[:limit]:
-                        commit_id = res['id']
-                        cursor.execute("SELECT type, attributes FROM nodes WHERE id=?", (commit_id,))
-                        row = cursor.fetchone()
-                        if not row: continue
-                        commit_node = Node(id=commit_id, type=row[0], attributes=json.loads(row[1]) if row[1] else {})
-
-                        cursor.execute("SELECT target_id, type FROM edges WHERE source_id=?", (commit_id,))
-                        edges_out = cursor.fetchall()
-                        cursor.execute("SELECT source_id, type FROM edges WHERE target_id=?", (commit_id,))
-                        edges_in = cursor.fetchall()
-
-                        related_nodes = []
-                        related_edges = []
-                        for target_id, etype in edges_out:
-                            related_edges.append(Edge(source_id=commit_id, target_id=target_id, type=etype))
-                            cursor.execute("SELECT type, attributes FROM nodes WHERE id=?", (target_id,))
-                            nrow = cursor.fetchone()
-                            if nrow:
-                                related_nodes.append(Node(id=target_id, type=nrow[0], attributes=json.loads(nrow[1]) if nrow[1] else {}))
-
-                        for source_id, etype in edges_in:
-                            related_edges.append(Edge(source_id=source_id, target_id=commit_id, type=etype))
-                            cursor.execute("SELECT type, attributes FROM nodes WHERE id=?", (source_id,))
-                            nrow = cursor.fetchone()
-                            if nrow:
-                                related_nodes.append(Node(id=source_id, type=nrow[0], attributes=json.loads(nrow[1]) if nrow[1] else {}))
-
-                        for plugin in loaded_plugins:
-                            try:
-                                module_name = plugin.__module__
-                                potential_name = module_name
-                                if module_name.startswith("gdskg_plugin_"):
-                                    potential_name = module_name.replace("gdskg_plugin_", "")
-                                elif "plugins." in module_name:
-                                    parts = module_name.split('.')
-                                    idx = parts.index("plugins")
-                                    if idx + 1 < len(parts):
-                                        potential_name = parts[idx+1]
-                                config = plugin_config.get(potential_name, {})
-                                plugin.process(commit_node, related_nodes, related_edges, api, config)
-                            except Exception as e:
-                                print(f"Error executing plugin {plugin}: {e}")
-                
-                store.flush()
-                store.close()
-                # Re-run search to include newly added plugin nodes
-                results = searcher.search(query, repo_name=repo_name, depth=depth, traverse_types=traverse_types)
+            # Re-run search to include newly added plugin nodes
+            results = searcher.search(query, repo_name=repo_name, depth=depth, traverse_types=traverse_types, semantic_only=semantic_only, min_score=min_score, top_n=top_n)
 
         if not results:
             return "No relevant matches found."
@@ -411,6 +341,8 @@ def index_repository(
 def get_function_history(
     function_name: str,
     graph_path: str = str(DEFAULT_GRAPH_PATH),
+    plugins: Optional[List[str]] = None,
+    parameters: Optional[List[str]] = None,
 ) -> str:
     """
     Finds the highest relevance function node for a given function name parameter and returns its history.
@@ -419,6 +351,8 @@ def get_function_history(
     Args:
         function_name: The name of the function to get history for.
         graph_path: Path to the knowledge graph SQLite database directory. Defaults to './gdskg_graph'.
+        plugins: Optional list of plugins to enable (e.g., ['GitHubPR']).
+        parameters: Optional list of plugin parameters in format 'PluginName:Key=Value'.
     """
     if not _read_server_status():
         return "Server is stopped. Please start the server first."
@@ -496,7 +430,17 @@ def get_function_history(
                         
                 if not ordered_versions:
                     continue
-                    
+                
+                if plugins:
+                    from core.plugin_manager import run_runtime_plugins
+                    commit_ids = []
+                    for vid in ordered_versions:
+                        cid = version_map[vid].get('commit_id')
+                        if cid and cid != 'Unknown':
+                            commit_ids.append(cid)
+                    if commit_ids:
+                        run_runtime_plugins(str(db_path), commit_ids, plugins, parameters)
+
                 last_v_attr = version_map[ordered_versions[-1]]
                 latest_path = last_v_attr.get('file_path', 'Unknown file')
                 

@@ -16,8 +16,7 @@ class ClickUpPlugin(PluginInterface):
         self.api_key = os.environ.get("CLICKUP_API_KEY")
         self.enabled = True
         if not self.api_key:
-            logger.warning("[ClickUpPlugin] CLICKUP_API_KEY environment variable not found. Plugin disabled.")
-            self.enabled = False
+            logger.info("[ClickUpPlugin] CLICKUP_API_KEY environment variable not found. Will look for token in config.")
         else:
             logger.info("[ClickUpPlugin] Initialized.")
         
@@ -28,6 +27,12 @@ class ClickUpPlugin(PluginInterface):
             return
         
         config = config or {}
+        if config and "token" in config and not self.api_key:
+            self.api_key = config["token"]
+            
+        if not self.api_key:
+            logger.warning("[ClickUpPlugin] No API key provided via env or config. Skipping.")
+            return
         
         # Get parameters
         # User defined regex to find task IDs, e.g. "CU-(\d+)" or "#([a-zA-Z0-9]+)"
@@ -62,6 +67,10 @@ class ClickUpPlugin(PluginInterface):
                 task_id = next((g for g in task_id if g), None)
                 
             if not task_id:
+                continue
+            
+            # Check if this task was already associated
+            if any(n.type == "CLICKUP_TASK" and f":{task_id}" in n.id for n in related_nodes):
                 continue
                 
             self._process_task(task_id, organization_id, commit_node, graph_api)

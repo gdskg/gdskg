@@ -207,6 +207,22 @@ def query(
     semantic_only: bool = typer.Option(
         False, "--semantic-only", "-S",
         help="Disable keyword search and only use semantic embeddings"
+    ),
+    min_score: float = typer.Option(
+        0.0, "--min-score", "-M",
+        help="Minimum relevance score to include in results"
+    ),
+    top_n: int = typer.Option(
+        5, "--top-n", "-N",
+        help="Maximum number of base commits to return"
+    ),
+    plugins: Optional[List[str]] = typer.Option(
+        None, "--plugin", "-P",
+        help="List of plugins to enable (e.g., 'GitHubPR')."
+    ),
+    parameters: Optional[List[str]] = typer.Option(
+        None, "--parameter", "-X",
+        help="Plugin parameters in format 'PluginName:Key=Value'."
     )
 ):
     """
@@ -221,8 +237,18 @@ def query(
     from rich.table import Table
     from rich.text import Text
 
+    if plugins:
+        depth = max(depth, 1)
+
     searcher = SearchEngine(str(db_path)) # Uses shared DB for vectors by default
-    results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only)
+    results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only, min_score=min_score, top_n=top_n)
+
+    if plugins and results:
+        from core.plugin_manager import run_runtime_plugins
+        commit_ids = [res['id'] for res in results]
+        run_runtime_plugins(str(db_path), commit_ids, plugins, parameters)
+        # Re-run search to include newly added plugin nodes
+        results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only, min_score=min_score, top_n=top_n)
 
     if not results:
         console.print("[yellow]No relevant matches found.[/yellow]")
@@ -272,6 +298,16 @@ def query(
                     display_name = content.split('\n')[0][:50]
                     if len(content.split('\n')[0]) > 50:
                         display_name += "..."
+                elif ntype == "PULL_REQUEST":
+                    number = attrs.get('number', '?')
+                    title = attrs.get('title', 'Extracted Pull Request')
+                    body = attrs.get('body')
+                    
+                    display_name = f"#{number} {title}"
+                    if body:
+                        # Append the full description, indented slightly
+                        indented_body = "\n".join([f"      {line}" for line in body.split('\n')])
+                        display_name += f"\n{indented_body}"
                 else:
                     display_name = node_id
 
@@ -279,7 +315,6 @@ def query(
                     grouped[ntype] = []
                 grouped[ntype].append(display_name)
             
-            # Simple color mapping for types
             type_colors = {
                 NodeType.FILE.value: "yellow",
                 NodeType.SYMBOL.value: "blue",
@@ -288,7 +323,8 @@ def query(
                 NodeType.REPOSITORY.value: "cyan",
                 NodeType.TIME_BUCKET.value: "white",
                 NodeType.COMMIT_MESSAGE.value: "italic white",
-                NodeType.COMMENT.value: "italic dim white"
+                NodeType.COMMENT.value: "italic dim white",
+                "PULL_REQUEST": "bold cyan"
             }
 
             for ntype, nodes in grouped.items():
@@ -296,15 +332,21 @@ def query(
                 label = ntype.replace('_', ' ').title()
                 detail.append(f"{label}: ", style=f"dim {color}")
                 
-                # Show up to 5 nodes per type
-                node_names = [Path(n).name if ntype == NodeType.FILE.value else n for n in nodes]
-                detail.append(", ".join(node_names[:5]), style=color)
-                if len(node_names) > 5:
-                    detail.append(f" (+{len(node_names)-5} more)", style=f"dim {color}")
-                detail.append("\n")
+                # For PRs, we want to skip the "comma separated" logic and just print them on their own lines
+                if ntype == "PULL_REQUEST":
+                    for pr in nodes:
+                        detail.append(pr, style=color)
+                        detail.append("\n")
+                else:
+                    # Show up to 5 nodes per type
+                    node_names = [Path(n).name if ntype == NodeType.FILE.value else n for n in nodes]
+                    detail.append(", ".join(node_names[:5]), style=color)
+                    if len(node_names) > 5:
+                        detail.append(f" (+{len(node_names)-5} more)", style=f"dim {color}")
+                    detail.append("\n")
 
         table.add_row(
-            str(res["relevance"]),
+            f"{res['relevance']:.2f}",
             res["id"][:8],
             detail
         )
@@ -319,6 +361,14 @@ def history(
         ..., "--graph", "-G",
         help="Directory where the knowledge graph (SQLite db) is stored",
         exists=True, file_okay=False, dir_okay=True, resolve_path=True
+    ),
+    plugins: Optional[List[str]] = typer.Option(
+        None, "--plugin", "-P",
+        help="List of plugins to enable (e.g., 'GitHubPR')."
+    ),
+    parameters: Optional[List[str]] = typer.Option(
+        None, "--parameter", "-X",
+        help="Plugin parameters in format 'PluginName:Key=Value'."
     )
 ):
     """
@@ -326,7 +376,7 @@ def history(
     """
     from mcp_server.server import get_function_history
     
-    result = get_function_history(function_name, graph_path=str(graph))
+    result = get_function_history(function_name, graph_path=str(graph), plugins=plugins, parameters=parameters)
     console.print(result)
 
 @app.command()
