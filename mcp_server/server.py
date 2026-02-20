@@ -313,6 +313,123 @@ def index_repository(
         tb = traceback.format_exc()
         return f"Error indexing repository: {str(e)}\n\nTraceback:\n{tb}"
 
+@mcp.tool()
+def get_function_history(
+    function_name: str,
+    graph_path: str = str(DEFAULT_GRAPH_PATH),
+) -> str:
+    """
+    Finds the highest relevance function node for a given function name parameter and returns its history.
+    This includes all versions of the function over time, showing the text and the commit that created each version.
+    
+    Args:
+        function_name: The name of the function to get history for.
+        graph_path: Path to the knowledge graph SQLite database directory. Defaults to './gdskg_graph'.
+    """
+    if not _read_server_status():
+        return "Server is stopped. Please start the server first."
+    
+    graph_dir = Path(graph_path)
+    db_path = graph_dir / "gdskg.db"
+    
+    if not db_path.exists():
+        return f"Error: Database not found at {db_path}. Please index a repository first."
+
+    try:
+        import sqlite3
+        import json
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT id, attributes FROM nodes WHERE type IN ('FUNCTION', 'SYMBOL') AND id LIKE ?", (f"%{function_name}%",))
+            matches = cursor.fetchall()
+            if not matches:
+                return f"No function found matching '{function_name}'."
+                
+            best_match = None
+            for match in matches:
+                if match[0].endswith(function_name):
+                    if not best_match or len(match[0]) < len(best_match[0]):
+                        best_match = match
+                        
+            if not best_match:
+                best_match = min(matches, key=lambda x: len(x[0]))
+                
+            func_id = best_match[0]
+            
+            cursor.execute("SELECT target_id FROM edges WHERE source_id=? AND type='HAS_HISTORY'", (func_id,))
+            history_rows = cursor.fetchall()
+            if not history_rows:
+                return f"Function '{func_id}' has no recorded history."
+                
+            output = f"Histories found for function: {func_id}\n\n"
+            
+            for h_idx, (history_id,) in enumerate(history_rows):
+                cursor.execute("""
+                    SELECT n.id, n.attributes 
+                    FROM edges e 
+                    JOIN nodes n ON e.target_id = n.id 
+                    WHERE e.source_id=? AND e.type='HAS_VERSION'
+                """, (history_id,))
+                version_rows = cursor.fetchall()
+                
+                if not version_rows:
+                    continue
+                
+                version_map = {row[0]: json.loads(row[1]) for row in version_rows}
+                
+                placeholders = ",".join(["?"]*len(version_map))
+                cursor.execute(f"""
+                    SELECT source_id, target_id
+                    FROM edges
+                    WHERE type='PREVIOUS_VERSION' AND source_id IN ({placeholders}) AND target_id IN ({placeholders})
+                """, list(version_map.keys()) * 2)
+                
+                prev_edges = cursor.fetchall()
+                prev_to_next = {src: tgt for src, tgt in prev_edges}
+                next_to_prev = {tgt: src for src, tgt in prev_edges}
+                
+                roots = [vid for vid in version_map.keys() if vid not in next_to_prev]
+                
+                ordered_versions = []
+                visited = set()
+                for root in roots:
+                    curr = root
+                    while curr and curr not in visited:
+                        ordered_versions.append(curr)
+                        visited.add(curr)
+                        curr = prev_to_next.get(curr)
+                        
+                if not ordered_versions:
+                    continue
+                    
+                last_v_attr = version_map[ordered_versions[-1]]
+                latest_path = last_v_attr.get('file_path', 'Unknown file')
+                
+                output += f"--- History Instance {h_idx+1} (Latest Path: {latest_path}) ---\n"
+                
+                for i, vid in enumerate(ordered_versions):
+                    v_attr = version_map[vid]
+                    commit_id = v_attr.get('commit_id', 'Unknown')
+                    
+                    cursor.execute("SELECT attributes FROM nodes WHERE id=?", (commit_id,))
+                    commit_row = cursor.fetchone()
+                    commit_msg = "Unknown"
+                    if commit_row:
+                        commit_attr = json.loads(commit_row[0])
+                        commit_msg = commit_attr.get('message', '').split('\n')[0]
+                    
+                    v_file = v_attr.get('file_path', latest_path)
+                    
+                    output += f"Version {i+1} (Commit: {commit_id[:8]} - File: {v_file})\n"
+                    output += f"Message: {commit_msg}\n"
+                    output += "-" * 40 + "\n"
+                    output += f"{v_attr.get('content', '')}\n\n"
+            
+            return output
+    except Exception as e:
+         return f"Error retrieving function history: {str(e)}"
+
 if __name__ == "__main__":
     import multiprocessing
     import uvicorn

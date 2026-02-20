@@ -281,6 +281,23 @@ def query(
     console.print(f"\n[bold green]Found {len(results)} relevant commits.[/bold green]")
 
 @app.command()
+def history(
+    function_name: str = typer.Argument(..., help="Name of the function to get history for"),
+    graph: Path = typer.Option(
+        ..., "--graph", "-G",
+        help="Directory where the knowledge graph (SQLite db) is stored",
+        exists=True, file_okay=False, dir_okay=True, resolve_path=True
+    )
+):
+    """
+    Get the version history of a specific function.
+    """
+    from mcp_server.server import get_function_history
+    
+    result = get_function_history(function_name, graph_path=str(graph))
+    console.print(result)
+
+@app.command()
 def serve(
     transport: str = typer.Option("sse", "--transport", "-t", help="Transport protocol: 'sse' (default) or 'stdio'"),
     port: int = typer.Option(8015, "--port", "-p", help="Port to listen on (SSE only)"),

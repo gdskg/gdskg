@@ -12,7 +12,7 @@ if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
 from mcp_server.server import (
-    index_folder,
+    index_repository,
     query_knowledge_graph,
     start_server,
     stop_server,
@@ -39,7 +39,7 @@ def test_index_folder(test_dirs):
     repo_path, graph_path = test_dirs
     
     # Test indexing
-    result = index_folder(str(repo_path), graph_path=str(graph_path), overwrite=True)
+    result = index_repository(str(repo_path), graph_path=str(graph_path), overwrite=True)
     assert "Successfully indexed" in result
     assert "Graph built at" in result
     assert graph_path.exists()
@@ -49,7 +49,7 @@ def test_query_knowledge_graph(test_dirs):
     repo_path, graph_path = test_dirs
     
     # Index first
-    index_folder(str(repo_path), graph_path=str(graph_path), overwrite=True)
+    index_repository(str(repo_path), graph_path=str(graph_path), overwrite=True)
     
     # Test valid query
     # We added 'def hello(): pass', so 'hello' should be a symbol if extraction works on txt/py
@@ -58,7 +58,7 @@ def test_query_knowledge_graph(test_dirs):
     os.system(f"cd {repo_path} && git add test_file.py && git commit -m 'Add python file'")
     
     # Re-index to catch the new commit
-    index_folder(str(repo_path), graph_path=str(graph_path), overwrite=False) # Append
+    index_repository(str(repo_path), graph_path=str(graph_path), overwrite=False) # Append
     
     result = query_knowledge_graph("world", graph_path=str(graph_path))
     # It should find something related to "world" or at least the commit message "Add python file" if query matches
@@ -78,23 +78,23 @@ def test_query_no_results(test_dirs):
     result = query_knowledge_graph("missing", graph_path=str(graph_path))
     assert "Error: Database not found" in result
 
-    # Create empty db? No, index_folder handles creation. 
+    # Create empty db? No, index_repository handles creation. 
     # Let's index then query garbage.
-    index_folder(str(repo_path), graph_path=str(graph_path), overwrite=True)
+    index_repository(str(repo_path), graph_path=str(graph_path), overwrite=True)
     result = query_knowledge_graph("supercalifragilisticexpialidocious_xyz", graph_path=str(graph_path))
     assert "No relevant matches found" in result
 
 def test_index_with_plugins(test_dirs):
     repo_path, graph_path = test_dirs
     # We can't easily mock the external API calls of GitHubPR/ClickUpTask here without more setup,
-    # but we can verify that index_folder accepts the arguments and tries to load them.
+    # but we can verify that index_repository accepts the arguments and tries to load them.
     # We'll use a bogus plugin name to see if it reports an error loading it, which proves the path works.
-    result = index_folder(str(repo_path), graph_path=str(graph_path), overwrite=True, plugins=["NonExistentPlugin"])
+    result = index_repository(str(repo_path), graph_path=str(graph_path), overwrite=True, plugins=["NonExistentPlugin"])
     assert "Error: Only 0/1 plugins loaded successfully" in result
 
     # Now try with a real plugin name but bogus parameters (which should be ignored or handled gracefully)
     # GitHubPR exists in the plugins folder.
-    result = index_folder(str(repo_path), graph_path=str(graph_path), overwrite=True, plugins=["GitHubPR"], parameters=["GitHubPR:key=value"])
+    result = index_repository(str(repo_path), graph_path=str(graph_path), overwrite=True, plugins=["GitHubPR"], parameters=["GitHubPR:key=value"])
     assert "Successfully indexed" in result
     assert "Plugins enabled: 1" in result
 
@@ -121,7 +121,7 @@ def test_stop_server_gates_requests(test_dirs):
     repo_path, graph_path = test_dirs
 
     # First index while server is running
-    index_folder(str(repo_path), graph_path=str(graph_path), overwrite=True)
+    index_repository(str(repo_path), graph_path=str(graph_path), overwrite=True)
 
     # Stop the server
     result = stop_server()
@@ -131,7 +131,7 @@ def test_stop_server_gates_requests(test_dirs):
     q_result = query_knowledge_graph("test", graph_path=str(graph_path))
     assert "Server is stopped" in q_result
 
-    i_result = index_folder(str(repo_path), graph_path=str(graph_path))
+    i_result = index_repository(str(repo_path), graph_path=str(graph_path))
     assert "Server is stopped" in i_result
 
 
@@ -142,7 +142,7 @@ def test_start_server_resumes_requests(test_dirs):
     stop_server()
     start_server()
 
-    result = index_folder(str(repo_path), graph_path=str(graph_path), overwrite=True)
+    result = index_repository(str(repo_path), graph_path=str(graph_path), overwrite=True)
     assert "Successfully indexed" in result
 
 

@@ -6,6 +6,8 @@ import git
 
 import re
 import hashlib
+import difflib
+import uuid
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from rich.progress import Progress
@@ -48,10 +50,11 @@ class GraphExtractor:
         self.plugins = plugins or []
         self.plugin_config = plugin_config or {}
         
-        # Two-pass collection
         import collections
         self.term_counts = collections.Counter()
         self.term_to_nodes = collections.defaultdict(set)
+        
+        self.active_functions: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
 
     def _process_keywords(self) -> None:
         """
@@ -338,6 +341,81 @@ class GraphExtractor:
                             target_id=commit_node.id,
                             type=EdgeType.MODIFIED_SYMBOL 
                         ))
+                    
+                    # Extract function versions
+                    modified_funcs = self.symbol_extractor.extract_modified_functions(content, language, affected_lines)
+                    for func_name, func_content in modified_funcs.items():
+                        func_node = Node(id=func_name, type=NodeType.FUNCTION, attributes={"name": func_name})
+                        self.store.upsert_node(func_node)
+                        self.store.upsert_edge(Edge(
+                            source_id=commit_node.id,
+                            target_id=func_node.id,
+                            type=EdgeType.MODIFIED_FUNCTION
+                        ))
+                        
+                        candidates = self.active_functions[func_name]
+                        best_candidate = None
+                        best_score = -1
+                        
+                        for candidate in candidates:
+                            similarity = difflib.SequenceMatcher(None, func_content, candidate['last_content']).quick_ratio()
+                            score = similarity + (1.0 if candidate['last_file'] == file_path else 0.0)
+                            
+                            if score > best_score:
+                                best_score = score
+                                best_candidate = candidate
+                                
+                        history_id = None
+                        prev_version_id = None
+                        
+                        if best_candidate and ((best_candidate['last_file'] == file_path) or (best_score > 0.6)):
+                            history_id = best_candidate['history_id']
+                            prev_version_id = best_candidate['last_version_id']
+                            best_candidate['last_content'] = func_content
+                            best_candidate['last_file'] = file_path
+                        else:
+                            history_id = f"HISTORY:{func_name}:{uuid.uuid4().hex[:8]}"
+                            history_node = Node(id=history_id, type=NodeType.FUNCTION_HISTORY, attributes={"function_name": func_name})
+                            self.store.upsert_node(history_node)
+                            self.store.upsert_edge(Edge(
+                                source_id=func_node.id,
+                                target_id=history_node.id,
+                                type=EdgeType.HAS_HISTORY
+                            ))
+                            best_candidate = {
+                                'history_id': history_id,
+                                'last_version_id': None,
+                                'last_content': func_content,
+                                'last_file': file_path
+                            }
+                            self.active_functions[func_name].append(best_candidate)
+                            
+                        hash_content = hashlib.sha256(func_content.encode('utf-8')).hexdigest()
+                        version_id = f"VERSION:{history_id}:{commit_node.id}:{hash_content[:8]}"
+                        version_node = Node(
+                            id=version_id,
+                            type=NodeType.FUNCTION_VERSION,
+                            attributes={"content": func_content, "commit_id": commit_node.id, "file_path": file_path}
+                        )
+                        self.store.upsert_node(version_node)
+                        self.store.upsert_edge(Edge(
+                            source_id=history_id,
+                            target_id=version_node.id,
+                            type=EdgeType.HAS_VERSION
+                        ))
+                        self.store.upsert_edge(Edge(
+                            source_id=commit_node.id,
+                            target_id=version_node.id,
+                            type=EdgeType.CREATED_VERSION
+                        ))
+                        
+                        if prev_version_id:
+                            self.store.upsert_edge(Edge(
+                                source_id=prev_version_id,
+                                target_id=version_node.id,
+                                type=EdgeType.PREVIOUS_VERSION
+                            ))
+                        best_candidate['last_version_id'] = version_node.id
                 
                 # Extract and attach comments/docstrings
                 comments = self.symbol_extractor.extract_comments(content, language, affected_lines)

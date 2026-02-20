@@ -24,6 +24,11 @@ class SymbolExtractor:
             "lexical_declaration",
             "variable_declaration"
         }
+        self.function_types = {
+            "function_definition",
+            "method_definition",
+            "function_declaration"
+        }
 
     def _extract_name(self, node: TSNode, content: str) -> Optional[str]:
         """
@@ -301,6 +306,42 @@ class SymbolExtractor:
 
         traverse(root_node)
         return list(matched_symbols)
+
+    def extract_modified_functions(self, file_content: str, language: str, affected_lines: Set[int]) -> Dict[str, str]:
+        """
+        Identify functions/methods that were directly modified.
+        Return their canonical names and source text.
+        """
+        parser = TreeSitterUtils.get_parser(language)
+        if not parser:
+            return {}
+
+        tree = parser.parse(bytes(file_content, "utf8"))
+        root_node = tree.root_node
+        
+        modified_functions = {}
+        
+        def traverse(node: TSNode, current_scope: str = ""):
+            start_line = node.start_point[0] + 1
+            end_line = node.end_point[0] + 1
+            node_range = set(range(start_line, end_line + 1))
+            intersection = node_range.intersection(affected_lines)
+            
+            new_scope = current_scope
+            if node.type in self.definition_types:
+                name = self._extract_name(node, file_content)
+                if name:
+                    new_scope = f"{current_scope}.{name}" if current_scope else name
+                    
+                    if intersection and node.type in self.function_types:
+                        content = file_content[node.start_byte:node.end_byte]
+                        modified_functions[new_scope] = content
+                        
+            for child in node.children:
+                traverse(child, new_scope)
+
+        traverse(root_node)
+        return modified_functions
     def extract_comments(self, file_content: str, language: str, affected_lines: Set[int]) -> List[Tuple[str, str, int]]:
         """
         Extract docstrings and inline comments that intersect with affected lines.
