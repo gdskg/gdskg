@@ -96,10 +96,9 @@ class SearchEngine:
                     commits[commit_id]["relevance"] += 10
 
                 cursor.execute("""
-
                     SELECT id, type FROM nodes 
-                    WHERE (type = ? OR type = ? OR type = ?) AND (id LIKE ? OR attributes LIKE ?)
-                """, (NodeType.SYMBOL.value, NodeType.FILE.value, NodeType.COMMIT_MESSAGE.value, f"%{kw}%", f"%{kw}%"))
+                    WHERE (type = ? OR type = ? OR type = ? OR type = ?) AND (id LIKE ? OR attributes LIKE ?)
+                """, (NodeType.SYMBOL.value, NodeType.FILE.value, NodeType.COMMIT_MESSAGE.value, NodeType.COMMENT.value, f"%{kw}%", f"%{kw}%"))
                 
                 matched_rows = cursor.fetchall()
                 for node_id, n_type in matched_rows:
@@ -109,6 +108,12 @@ class SearchEngine:
                             SELECT source_id FROM edges 
                             WHERE target_id = ? AND type = ?
                         """, (node_id, EdgeType.HAS_MESSAGE.value))
+                    elif n_type == NodeType.COMMENT.value:
+                        # Follow HAS_COMMENT back to COMMIT (target is commit, source is comment)
+                        cursor.execute("""
+                            SELECT target_id FROM edges 
+                            WHERE source_id = ? AND type = ?
+                        """, (node_id, EdgeType.HAS_COMMENT.value))
                     else:
                         cursor.execute("""
                             SELECT target_id FROM edges 

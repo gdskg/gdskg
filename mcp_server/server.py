@@ -196,6 +196,8 @@ def index_repository(
     if repository.startswith("http://") or repository.startswith("https://"):
         import subprocess
         
+        # Determine local checkout path
+        cache_dir = Path.home() / ".gdskg" / "cache"
         repo_name = repository.split("/")[-1].replace(".git", "")
         checkout_path = cache_dir / repo_name
 
@@ -258,6 +260,11 @@ def index_repository(
                 # Appending is supported
                 pass
 
+        # Initialize DB and Core modules
+        from core.graph_store import GraphStore
+        from core.extractor import GraphExtractor
+        from core.plugin_manager import PluginManager
+        
         store = GraphStore(db_path)
 
         

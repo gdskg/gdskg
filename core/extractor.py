@@ -14,6 +14,7 @@ from core.graph_store import GraphStore
 from core.schema import Node, Edge, NodeType, EdgeType
 from analysis.symbol_extractor import SymbolExtractor
 from analysis.secret_scanner import SecretScanner
+from analysis.keyword_extractor import KeywordExtractor
 from analysis.tree_sitter_utils import TreeSitterUtils
 from core.plugin_interfaces import PluginInterface, GraphInterface
 
@@ -43,8 +44,37 @@ class GraphExtractor:
         self.repo = git.Repo(repo_path)
         self.symbol_extractor = SymbolExtractor()
         self.secret_scanner = SecretScanner()
+        self.keyword_extractor = KeywordExtractor()
         self.plugins = plugins or []
         self.plugin_config = plugin_config or {}
+        
+        # Two-pass collection
+        import collections
+        self.term_counts = collections.Counter()
+        self.term_to_nodes = collections.defaultdict(set)
+
+    def _process_keywords(self) -> None:
+        """
+        Finalize keyword analysis by identifying major terms and linking them to nodes.
+        """
+        major_terms = self.keyword_extractor.get_major_terms(self.term_counts, top_n=100, min_freq=2)
+        
+        for term in major_terms:
+            keyword_node_id = f"KEYWORD:{term}"
+            keyword_node = Node(
+                id=keyword_node_id,
+                type=NodeType.KEYWORD,
+                attributes={"term": term, "frequency": self.term_counts[term]}
+            )
+            self.store.upsert_node(keyword_node)
+            
+            for node_id in self.term_to_nodes[term]:
+                self.store.upsert_edge(Edge(
+                    source_id=node_id,
+                    target_id=keyword_node_id,
+                    type=EdgeType.HAS_KEYWORD,
+                    weight=1.0
+                ))
     
     def process_repo(self) -> None:
         """
@@ -76,6 +106,9 @@ class GraphExtractor:
             for commit in commits:
                 self._process_commit(commit, repo_node)
                 progress.advance(task)
+            
+            # Second pass: Process major keywords
+            self._process_keywords()
 
     def _process_commit(self, commit: git.Commit, repo_node: Node) -> None:
         """
@@ -144,6 +177,12 @@ class GraphExtractor:
             type=EdgeType.OCCURRED_IN
         ))
 
+        # First pass keyword collection
+        keywords = self.keyword_extractor.extract_keywords(commit.message)
+        for kw in keywords:
+            self.term_counts[kw] += 1
+            self.term_to_nodes[kw].add(commit_node.id)
+
         parent = commit.parents[0] if commit.parents else None
         
         if parent:
@@ -209,6 +248,12 @@ class GraphExtractor:
         )
         self.store.upsert_node(file_node)
 
+        # Extract keywords from file names
+        file_keywords = self.keyword_extractor.extract_keywords(file_node.attributes["name"], is_code=True)
+        for fkw in file_keywords:
+            self.term_counts[fkw] += 1
+            self.term_to_nodes[fkw].add(file_node.id)
+
         
         self.store.upsert_edge(Edge(
             source_id=commit_node.id,
@@ -246,6 +291,12 @@ class GraphExtractor:
                         type=EdgeType.HAS_SYMBOL,
                         attributes={}
                     ))
+
+                    # Extract keywords from symbol names
+                    symbol_keywords = self.keyword_extractor.extract_keywords(name, is_code=True)
+                    for skw in symbol_keywords:
+                        self.term_counts[skw] += 1
+                        self.term_to_nodes[skw].add(symbol_node.id)
                 
                 full_symbol_table = self.symbol_extractor.build_symbol_table(content, language)
                 
@@ -278,6 +329,33 @@ class GraphExtractor:
                             target_id=commit_node.id,
                             type=EdgeType.MODIFIED_SYMBOL 
                         ))
+                
+                # Extract and attach comments/docstrings
+                comments = self.symbol_extractor.extract_comments(content, language, affected_lines)
+                for comment_text, comment_type, line_num in comments:
+                    # Deterministic ID for comments within a file/commit
+                    comment_hash = hashlib.sha256(f"{file_path}:{line_num}:{comment_text}".encode()).hexdigest()[:12]
+                    comment_node = Node(
+                        id=f"COMMENT:{comment_hash}",
+                        type=NodeType.COMMENT,
+                        attributes={
+                            "content": comment_text,
+                            "type": comment_type,
+                            "file": file_path,
+                            "line": line_num
+                        }
+                    )
+                    self.store.upsert_node(comment_node)
+                    self.store.upsert_edge(Edge(
+                        source_id=comment_node.id,
+                        target_id=commit_node.id,
+                        type=EdgeType.HAS_COMMENT
+                    ))
+                    self.store.upsert_edge(Edge(
+                        source_id=file_node.id,
+                        target_id=comment_node.id,
+                        type=EdgeType.CONTAINS_COMMENT
+                    ))
 
             secrets = self.secret_scanner.scan(content)
             for secret in secrets:
@@ -340,3 +418,4 @@ class GraphAPIWrapper(GraphInterface):
         """
 
         self.store.upsert_edge(Edge(source_id=source_id, target_id=target_id, type=type, attributes=attributes or {}))
+

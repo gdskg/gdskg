@@ -16,6 +16,8 @@ class NodeType(str, Enum):
     SYMBOL = "SYMBOL"
     SECRET = "SECRET"
     COMMIT_MESSAGE = "COMMIT_MESSAGE"
+    KEYWORD = "KEYWORD"
+    COMMENT = "COMMENT"
 
 class EdgeType(str, Enum):
     """
@@ -31,6 +33,9 @@ class EdgeType(str, Enum):
     REFERENCES_ENV = "REFERENCES_ENV"
     HAS_MESSAGE = "HAS_MESSAGE"
     HAS_SYMBOL = "HAS_SYMBOL"
+    HAS_KEYWORD = "HAS_KEYWORD"
+    CONTAINS_COMMENT = "CONTAINS_COMMENT"
+    HAS_COMMENT = "HAS_COMMENT"
 
 @dataclass
 class Node:

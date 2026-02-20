@@ -301,3 +301,58 @@ class SymbolExtractor:
 
         traverse(root_node)
         return list(matched_symbols)
+    def extract_comments(self, file_content: str, language: str, affected_lines: Set[int]) -> List[Tuple[str, str, int]]:
+        """
+        Extract docstrings and inline comments that intersect with affected lines.
+
+        Args:
+            file_content (str): The source code content.
+            language (str): The programming language.
+            affected_lines (Set[int]): Lines changed in the current commit.
+
+        Returns:
+            List[Tuple[str, str, int]]: A list of (content, type, line_number) tuples.
+        """
+        parser = TreeSitterUtils.get_parser(language)
+        if not parser:
+            return []
+
+        tree = parser.parse(bytes(file_content, "utf8"))
+        root_node = tree.root_node
+        comments = []
+
+        def traverse(node: TSNode):
+            start_line = node.start_point[0] + 1
+            end_line = node.end_point[0] + 1
+            node_range = set(range(start_line, end_line + 1))
+            
+            is_comment = False
+            comment_type = "inline"
+
+            # Check for standard comments
+            if node.type in ["comment", "line_comment", "block_comment"]:
+                is_comment = True
+
+            # Check for Python docstrings (expression_statement -> string)
+            elif language == "python" and node.type == "expression_statement":
+                # A docstring in Python is often an expression statement containing only a string
+                if len(node.children) == 1 and node.children[0].type == "string":
+                    is_comment = True
+                    comment_type = "docstring"
+
+            # Check for JS/TS docstrings (often inside specific comment formats, but handled via 'comment' usually)
+            
+            if is_comment and node_range.intersection(affected_lines):
+                content = file_content[node.start_byte:node.end_byte].strip()
+                # Clean python strings if docstring
+                if comment_type == "docstring":
+                   content = content.strip('\'" \n\t')
+                
+                if content:
+                    comments.append((content, comment_type, start_line))
+
+            for child in node.children:
+                traverse(child)
+
+        traverse(root_node)
+        return comments

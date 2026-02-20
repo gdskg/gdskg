@@ -140,7 +140,7 @@ def build(
 
     # Start Processing
     console.print(f"[bold green]Starting extraction...[/bold green]")
-    extractor = GraphExtractor(repository, store, plugins=loaded_plugins, plugin_config=plugin_config)
+    extractor = GraphExtractor(repo_path, store, plugins=loaded_plugins, plugin_config=plugin_config)
     
     try:
         extractor.process_repo()
@@ -227,6 +227,11 @@ def query(
                         display_name += "..."
                 elif ntype == NodeType.FILE.value:
                     display_name = Path(node_id).name
+                elif ntype == NodeType.COMMENT.value:
+                    content = attrs.get('content', node_id).strip()
+                    display_name = content.split('\n')[0][:50]
+                    if len(content.split('\n')[0]) > 50:
+                        display_name += "..."
                 else:
                     display_name = node_id
 
@@ -242,7 +247,8 @@ def query(
                 NodeType.COMMIT.value: "magenta",
                 NodeType.REPOSITORY.value: "cyan",
                 NodeType.TIME_BUCKET.value: "white",
-                NodeType.COMMIT_MESSAGE.value: "italic white"
+                NodeType.COMMIT_MESSAGE.value: "italic white",
+                NodeType.COMMENT.value: "italic dim white"
             }
 
             for ntype, nodes in grouped.items():
