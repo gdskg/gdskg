@@ -10,3 +10,7 @@ pystray
 Pillow
 pyinstaller
 nltk
+onnxruntime
+tokenizers
+numpy
+huggingface_hub

@@ -3,6 +3,8 @@ import sys
 from mcp.server.fastmcp import FastMCP
 from pathlib import Path
 from typing import Optional, List
+from core.vector_store import VectorStore
+from analysis.embedder import ONNXEmbedder
 
 mcp = FastMCP("gdskg")
 
@@ -301,9 +303,13 @@ def index_repository(
         extractor.process_repo()
         node_count = store.count_nodes()
         store.close()
-
         
-        msg = f"Successfully indexed '{repository}'. Graph built at '{db_path}' with {node_count} nodes."
+        vector_store = VectorStore(db_path)
+        embedder = ONNXEmbedder()
+        embedded_count = vector_store.build_from_graph(str(db_path), embedder)
+        vector_store.close()
+        
+        msg = f"Successfully indexed '{repository}'. Graph built at '{db_path}' with {node_count} nodes. Vector DB stored {embedded_count} semantic embeddings."
         if loaded_plugins:
              msg += f" Plugins enabled: {len(loaded_plugins)}."
         return msg

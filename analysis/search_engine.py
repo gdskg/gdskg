@@ -12,17 +12,19 @@ class SearchEngine:
     filter by repository, and traverse the graph to find related nodes.
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, vector_db_path: str = None):
         """
         Initialize the SearchEngine.
 
         Args:
             db_path (str): The file path to the SQLite database.
+            vector_db_path (str, optional): Path to the vector database. Defaults to the same as db_path.
         """
 
         self.db_path = db_path
+        self.vector_db_path = vector_db_path or db_path
 
-    def search(self, query: str, repo_name: str = None, depth: int = 1, traverse_types: List[str] = None) -> List[Dict[str, Any]]:
+    def search(self, query: str, repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False) -> List[Dict[str, Any]]:
         """
         Search for relevant commits based on keywords and traverse the graph.
 
@@ -38,17 +40,22 @@ class SearchEngine:
                 sorted by relevance.
         """
 
-        keywords = query.lower().split()
-        if not keywords:
-            return []
+        if semantic_only:
+            keywords = []
+        else:
+            stop_words = {'the', 'and', 'for', 'how', 'to', 'of', 'in', 'is', 'a', 'with', 'that', 'this', 'or'}
+            raw_keywords = query.lower().split()
+            keywords = [kw for kw in raw_keywords if kw not in stop_words]
+            if not keywords: # Fallback to all if everything is a stop word
+                keywords = raw_keywords
+
+        commits = {}
         
+        # Determine allowed types early
         allowed_types = set()
         if traverse_types:
             allowed_types = {t.upper() for t in traverse_types}
 
-        commits = {}
-
-        
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
@@ -137,6 +144,52 @@ class SearchEngine:
                             commits[cid]["relevance"] += 5
                             if reason not in commits[cid]["reasons"]:
                                 commits[cid]["reasons"].append(reason)
+
+            # 4. Semantic Search via Vector DB
+            if Path(self.vector_db_path).exists():
+                try:
+                    from core.vector_store import VectorStore
+                    from analysis.embedder import ONNXEmbedder
+                    
+                    vector_store = VectorStore(Path(self.vector_db_path))
+                    embedder = ONNXEmbedder()
+                    
+                    # Embed full query (not just keywords)
+                    query_embedding = embedder.embed([query])
+                    if len(query_embedding) > 0:
+                        semantic_results = vector_store.search(query_embedding[0], top_k=20)
+                        for node_id, node_type, similarity in semantic_results:
+                            if similarity < 0.20: # Threshold
+                                continue
+                                
+                            # Find commits connected to this node
+                            if node_type == NodeType.SYMBOL.value:
+                                cursor.execute("""
+                                    SELECT target_id FROM edges 
+                                    WHERE source_id = ? AND type = ?
+                                """, (node_id, EdgeType.MODIFIED_SYMBOL.value))
+                                reason = f"Similar meaning identified (matched {node_type} '{node_id}' score={similarity:.2f})"
+                            elif node_type == NodeType.FUNCTION.value:
+                                # Function node connected to commit? Let's check MODIFIED_FUNCTION
+                                cursor.execute("""
+                                    SELECT source_id FROM edges 
+                                    WHERE target_id = ? AND type = ?
+                                """, (node_id, EdgeType.MODIFIED_FUNCTION.value))
+                                reason = f"Similar meaning identified (matched {node_type} '{node_id}' score={similarity:.2f})"
+                            else:
+                                continue
+                                
+                            linked_commits = [r[0] for r in cursor.fetchall()]
+                            for cid in linked_commits:
+                                self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
+                                if cid in commits:
+                                    # Base relevance score boost from similarity
+                                    commits[cid]["relevance"] += (similarity * 20)
+                                    if reason not in commits[cid]["reasons"]:
+                                        commits[cid]["reasons"].append(reason)
+                                        
+                except Exception as e:
+                    print(f"Warning: Vector search failed: {e}")
 
             if depth > 0:
 

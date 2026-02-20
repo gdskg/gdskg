@@ -1,4 +1,5 @@
 ./debug_ts.py
+test_repos/
 output_graph/
 __pycache__
 .pytest_cache.

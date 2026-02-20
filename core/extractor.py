@@ -29,7 +29,8 @@ class GraphExtractor:
     comprehensive representation of the software evolution.
     """
 
-    def __init__(self, repo_path: Path, graph_store: GraphStore, plugins: List[PluginInterface] = None, plugin_config: Dict[str, Dict[str, Any]] = None):
+    def __init__(self, repo_path: Path, graph_store: GraphStore, plugins: List[PluginInterface] = None, 
+                 plugin_config: Dict[str, Dict[str, Any]] = None, progress=None, task_id=None):
         """
         Initialize the GraphExtractor.
 
@@ -39,6 +40,8 @@ class GraphExtractor:
             plugins (List[PluginInterface], optional): A list of plugins to execute during extraction.
             plugin_config (Dict[str, Dict[str, Any]], optional): Configuration settings for the plugins, 
                 keyed by plugin name.
+            progress (rich.progress.Progress, optional): Shared progress instance.
+            task_id (TaskID, optional): Existing task ID within the shared progress.
         """
 
         self.repo_path = repo_path
@@ -49,6 +52,8 @@ class GraphExtractor:
         self.keyword_extractor = KeywordExtractor()
         self.plugins = plugins or []
         self.plugin_config = plugin_config or {}
+        self.progress = progress
+        self.task_id = task_id
         
         import collections
         self.term_counts = collections.Counter()
@@ -99,19 +104,24 @@ class GraphExtractor:
 
         commits = list(self.repo.iter_commits(topo_order=True, reverse=True))
 
-        
-        from rich.console import Console
-        stderr_console = Console(file=sys.stderr)
-        
-        with Progress(console=stderr_console) as progress:
-            task = progress.add_task("[green]Processing commits...", total=len(commits))
-            
+        if self.progress is not None and self.task_id is not None:
             for commit in commits:
                 self._process_commit(commit, repo_node)
-                progress.advance(task)
+                self.progress.advance(self.task_id)
+        else:
+            from rich.progress import Progress
+            from rich.console import Console
+            stderr_console = Console(file=sys.stderr)
             
-            # Second pass: Process major keywords
-            self._process_keywords()
+            with Progress(console=stderr_console) as progress:
+                task = progress.add_task("[green]Processing commits...", total=len(commits))
+                
+                for commit in commits:
+                    self._process_commit(commit, repo_node)
+                    progress.advance(task)
+            
+        # Second pass: Process major keywords
+        self._process_keywords()
 
     def _process_commit(self, commit: git.Commit, repo_node: Node) -> None:
         """

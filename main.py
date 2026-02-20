@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import Optional, List
 from rich.console import Console
+from core.vector_store import VectorStore
+from analysis.embedder import ONNXEmbedder
 
 app = typer.Typer(help="Git-Derived Software Knowledge Graph CLI")
 console = Console()
@@ -139,18 +141,55 @@ def build(
         console.print(f"Plugin configuration: {plugin_config}")
 
     # Start Processing
-    console.print(f"[bold green]Starting extraction...[/bold green]")
-    extractor = GraphExtractor(repo_path, store, plugins=loaded_plugins, plugin_config=plugin_config)
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
     
-    try:
-        extractor.process_repo()
-        node_count = store.count_nodes()
-        console.print(f"[bold green]Success![/bold green] Graph built with {node_count} nodes.")
-    except Exception as e:
-        console.print(f"[bold red]Failed:[/bold red] {e}")
-        # raise e # Debugging
-    finally:
-        store.close()
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=True
+    ) as progress:
+        # Graph Extraction
+        extract_task = progress.add_task("[green]Extracting graph...", total=None) 
+        # We need to get total commits for progress
+        from git import Repo
+        repo = Repo(repo_path)
+        commits_total = sum(1 for _ in repo.iter_commits())
+        progress.update(extract_task, total=commits_total)
+        
+        extractor = GraphExtractor(repo_path, store, plugins=loaded_plugins, plugin_config=plugin_config, 
+                                   progress=progress, task_id=extract_task)
+        
+        try:
+            extractor.process_repo()
+            progress.update(extract_task, completed=commits_total)
+            
+            node_count = store.count_nodes()
+            console.print(f"[bold green]✓[/bold green] Graph built with [blue]{node_count}[/blue] nodes.")
+            
+            # Semantic Indexing
+            embed_task = progress.add_task("[cyan]Semantic indexing...", total=None)
+            
+            vstore = VectorStore(db_path)
+            embedder = ONNXEmbedder()
+            
+            def update_embed_progress(count, total=None):
+                if total is not None:
+                    progress.update(embed_task, total=total)
+                if count > 0:
+                    progress.advance(embed_task, count)
+            
+            embedded_count = vstore.build_from_graph(str(db_path), embedder, progress_callback=update_embed_progress)
+            console.print(f"[bold green]✓[/bold green] Semantic indexing complete! [blue]{embedded_count}[/blue] embeddings generated.")
+            
+        except Exception as e:
+            console.print(f"[bold red]✗ Build failed:[/bold red] {e}")
+            raise typer.Exit(code=1)
+        finally:
+            store.close()
         
     console.print("[yellow]Detailed analysis complete.[/yellow]")
 
@@ -173,6 +212,10 @@ def query(
     traverse: Optional[List[str]] = typer.Option(
         None, "--dfs-attribute", "-T",
         help="Specific node types to allowed traversal through (e.g., AUTHOR, TIME_BUCKET). Default: blocks AUTHOR, TIME_BUCKET, REPOSITORY."
+    ),
+    semantic_only: bool = typer.Option(
+        False, "--semantic-only", "-S",
+        help="Disable keyword search and only use semantic embeddings"
     )
 ):
     """
@@ -187,8 +230,8 @@ def query(
     from rich.table import Table
     from rich.text import Text
 
-    searcher = SearchEngine(str(db_path))
-    results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse)
+    searcher = SearchEngine(str(db_path)) # Uses shared DB for vectors by default
+    results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only)
 
     if not results:
         console.print("[yellow]No relevant matches found.[/yellow]")
@@ -210,10 +253,8 @@ def query(
 
         if res.get('reasons'):
             detail.append("Matched because:\n", style="bold cyan")
-            for reason in res['reasons'][:3]: # Show top 3 reasons
+            for reason in res['reasons']:
                 detail.append(f" • {reason}\n", style="dim cyan")
-            if len(res['reasons']) > 3:
-                detail.append(f" • (+{len(res['reasons'])-3} more reasons)\n", style="dim cyan")
             detail.append("\n")
 
         if depth > 0:
