@@ -377,7 +377,12 @@ def query(
         )
 
     console.print(table)
-    console.print(f"\n[bold green]Found {len(results)} relevant commits.[/bold green]")
+    if len(results) >= top_n:
+        summary_msg = f"Top {len(results)} relevant commits"
+    else:
+        noun = "commit" if len(results) == 1 else "commits"
+        summary_msg = f"Found {len(results)} relevant {noun}"
+    console.print(f"\n[bold green]{summary_msg}.[/bold green]")
 
 @app.command()
 def history(
