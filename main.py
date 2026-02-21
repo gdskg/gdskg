@@ -236,6 +236,14 @@ def query(
     show_matches: bool = typer.Option(
         False, "--show-matches",
         help="Show detailed explanation of why each result matched"
+    ),
+    all_matches: bool = typer.Option(
+        False, "--all-matches",
+        help="Do not filter deep traversal nodes. Show all vaguely related nodes."
+    ),
+    all_files: bool = typer.Option(
+        False, "--all-files",
+        help="Show all files edited in matching commits, even if irrelevant to the query."
     )
 ):
     """
@@ -262,14 +270,14 @@ def query(
                 parsed_filters[ftype.upper()] = fval
 
     searcher = SearchEngine(str(db_path)) # Uses shared DB for vectors by default
-    results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only, min_score=min_score, top_n=top_n, filters=parsed_filters)
+    results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only, min_score=min_score, top_n=top_n, filters=parsed_filters, all_matches=all_matches, all_files=all_files)
 
     if plugins and results:
         from core.plugin_manager import run_runtime_plugins
         commit_ids = [res['id'] for res in results]
         run_runtime_plugins(str(db_path), commit_ids, plugins, parameters)
         # Re-run search to include newly added plugin nodes
-        results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only, min_score=min_score, top_n=top_n)
+        results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only, min_score=min_score, top_n=top_n, all_matches=all_matches, all_files=all_files)
 
     if not results:
         console.print("[yellow]No relevant matches found.[/yellow]")

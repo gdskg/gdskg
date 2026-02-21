@@ -88,6 +88,12 @@ python main.py query "auth" -G ./graph_output -D 2 -T File
 
 # Multi-attribute traversal
 python main.py query "database" -G ./graph_output -D 3 -T Symbol -T File
+
+# Show all vaguely related nodes across deep traversals without filtering
+python main.py query "security" -G ./graph_output -D 2 --all-matches
+
+# Show all files modified in the matching commits, bypassing file relevance filters
+python main.py query "config" -G ./graph_output -D 1 --all-files
 ```
 
 ---

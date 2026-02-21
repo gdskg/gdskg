@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from typing import List, Dict, Any, Set, Optional
 from core.schema import NodeType, EdgeType
+import math
 
 class SearchEngine:
     """
@@ -24,7 +25,7 @@ class SearchEngine:
         self.db_path = db_path
         self.vector_db_path = vector_db_path or db_path
 
-    def search(self, query: str = "", repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5, filters: Dict[str, str] = None) -> List[Dict[str, Any]]:
+    def search(self, query: str = "", repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5, filters: Dict[str, str] = None, all_matches: bool = False, all_files: bool = False) -> List[Dict[str, Any]]:
         """
         Search for relevant commits based on keywords and traverse the graph.
 
@@ -136,8 +137,11 @@ class SearchEngine:
                             continue
                         self._ensure_commit_in_results(commits, node_id, n_attr_json, repo_ids, cursor)
                         if node_id in commits:
-                            commits[node_id]["relevance"] += 10
-                            commits[node_id]["reasons"].append(f"Keyword '{kw}' found in commit metadata")
+                            kw_count = commits[node_id]["keyword_matches"].get(kw, 0)
+                            commits[node_id]["relevance"] += 10.0 / (kw_count + 1)
+                            commits[node_id]["keyword_matches"][kw] = kw_count + 1
+                            if kw_count == 0:
+                                commits[node_id]["reasons"].append(f"Keyword '{kw}' found in commit metadata")
                     
                     # If it's a KEYWORD node, find linked commits
                     elif n_type == NodeType.KEYWORD.value:
@@ -150,7 +154,9 @@ class SearchEngine:
                                 continue
                             self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
                             if cid in commits:
-                                commits[cid]["relevance"] += 8
+                                kw_count = commits[cid]["keyword_matches"].get(kw, 0)
+                                commits[cid]["relevance"] += 8.0 / (kw_count + 1)
+                                commits[cid]["keyword_matches"][kw] = kw_count + 1
                                 rsn = f"Significant keyword '{kw}' found in change hunks"
                                 if rsn not in commits[cid]["reasons"]:
                                     commits[cid]["reasons"].append(rsn)
@@ -183,7 +189,9 @@ class SearchEngine:
                                     continue
                                 self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
                                 if cid in commits:
-                                    commits[cid]["relevance"] += 5
+                                    kw_count = commits[cid]["keyword_matches"].get(kw, 0)
+                                    commits[cid]["relevance"] += 5.0 / (kw_count + 1)
+                                    commits[cid]["keyword_matches"][kw] = kw_count + 1
                                     reason = f"Keyword '{kw}' matches {n_type} '{node_id}'"
                                     if reason not in commits[cid]["reasons"]:
                                         commits[cid]["reasons"].append(reason)
@@ -194,6 +202,9 @@ class SearchEngine:
                                         "attributes": json.loads(n_attr_json) if n_attr_json else {}
                                     }
 
+
+            # Pre-compute semantic relevance set for connection filtering
+            semantic_relevance_set = set()
 
             # 4. Semantic Search via Vector DB
             if Path(self.vector_db_path).exists():
@@ -207,7 +218,12 @@ class SearchEngine:
                     # Embed full query (not just keywords)
                     query_embedding = embedder.embed([query])
                     if len(query_embedding) > 0:
-                        semantic_results = vector_store.search(query_embedding[0], top_k=20)
+                        all_semantic_results = vector_store.search(query_embedding[0], top_k=200)
+                        for nid, ntype, sim in all_semantic_results:
+                            if sim >= 0.20:
+                                semantic_relevance_set.add(nid)
+
+                        semantic_results = all_semantic_results[:20]
                         for node_id, node_type, similarity in semantic_results:
                             if similarity < 0.20: # Threshold
                                 continue
@@ -236,12 +252,28 @@ class SearchEngine:
                                 self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
                                 if cid in commits:
                                     # Base relevance score boost from similarity
-                                    commits[cid]["relevance"] += (similarity * 20)
+                                    sem_count = commits[cid]["semantic_matches"]
+                                    commits[cid]["relevance"] += (similarity * 20.0) / (sem_count + 1)
+                                    commits[cid]["semantic_matches"] = sem_count + 1
                                     if reason not in commits[cid]["reasons"]:
                                         commits[cid]["reasons"].append(reason)
                                         
                 except Exception as e:
                     print(f"Warning: Vector search failed: {e}")
+
+            # Commit High File Count Penalty
+            for cdict in commits.values():
+                cid = cdict["id"]
+                cursor.execute("""
+                    SELECT count(*) FROM edges
+                    WHERE source_id = ? AND type = ?
+                """, (cid, EdgeType.MODIFIED_FILE.value))
+                num_files = cursor.fetchone()[0]
+                if num_files > 0:
+                    penalty = max(1.0, math.log10(num_files))
+                    if penalty > 1.0:
+                        cdict["relevance"] /= (penalty * 3)
+                        cdict["reasons"].append(f"Penalized relevance (divided by {penalty:.2f}) for modifying {num_files} files")
 
             # Filter and sort base commits here so depth traversal only processes top records
             sorted_commits = [r for r in commits.values() if r["relevance"] >= min_score]
@@ -249,7 +281,6 @@ class SearchEngine:
             top_commits = sorted_commits[:top_n]
 
             if depth > 0:
-
                 for cdict in top_commits:
                     cid = cdict["id"]
                     queue = [(cid, 0)]
@@ -278,11 +309,58 @@ class SearchEngine:
                                 if n_row:
                                     n_type, n_attrs_json = n_row
                                     n_attrs = json.loads(n_attrs_json) if n_attrs_json else {}
-                                    cdict["connections"][neighbor_id] = {
-                                        "type": n_type,
-                                        "distance": dist + 1,
-                                        "attributes": n_attrs
-                                    }
+                                    is_trigger_node = neighbor_id in cdict["connections"] and cdict["connections"][neighbor_id].get("distance", -1) == 0
+
+                                    include_connection = True
+                                    if not all_matches and not is_trigger_node:
+                                        if n_type == NodeType.KEYWORD.value:
+                                            text_match = any(kw in neighbor_id.lower() or kw in str(n_attrs.get("name", "")).lower() for kw in keywords)
+                                            if not text_match and neighbor_id not in semantic_relevance_set:
+                                                include_connection = False
+                                        elif n_type == NodeType.SYMBOL.value:
+                                            if neighbor_id not in semantic_relevance_set:
+                                                include_connection = False
+                                        elif n_type == NodeType.FILE.value and not all_files:
+                                            if neighbor_id not in semantic_relevance_set:
+                                                cursor.execute("""
+                                                    SELECT target_id, type FROM edges WHERE source_id = ? AND type IN (?, ?, ?)
+                                                    UNION
+                                                    SELECT source_id, type FROM edges WHERE target_id = ? AND type IN (?, ?, ?)
+                                                """, (neighbor_id, EdgeType.HAS_SYMBOL.value, EdgeType.HAS_KEYWORD.value, EdgeType.MODIFIED_SYMBOL.value, 
+                                                      neighbor_id, EdgeType.HAS_SYMBOL.value, EdgeType.HAS_KEYWORD.value, EdgeType.MODIFIED_SYMBOL.value))
+                                                linked_nodes = [r[0] for r in cursor.fetchall()]
+                                                
+                                                has_relevant_child = False
+                                                for ln in linked_nodes:
+                                                    if ln in semantic_relevance_set or any(kw in ln.lower() for kw in keywords):
+                                                        has_relevant_child = True
+                                                        break
+                                                        
+                                                if not has_relevant_child:
+                                                    include_connection = False
+                                        elif n_type in [NodeType.COMMIT.value, NodeType.COMMIT_MESSAGE.value, NodeType.COMMENT.value, NodeType.SECRET.value, NodeType.FUNCTION.value]:
+                                            if neighbor_id not in semantic_relevance_set:
+                                                text_match = False
+                                                n_text = str(n_attrs.get("message", "")) + " " + str(n_attrs.get("text", "")) + " " + str(n_attrs.get("title", "")) + " " + str(n_attrs.get("name", ""))
+                                                n_text = n_text.lower()
+                                                for kw in keywords:
+                                                    if kw in n_text:
+                                                        text_match = True
+                                                        break
+                                                if not text_match:
+                                                    include_connection = False
+                                                    
+                                    if include_connection:
+                                        # Only add if we aren't overwriting a distance 0 trigger node with a higher distance
+                                        if not is_trigger_node:
+                                            cdict["connections"][neighbor_id] = {
+                                                "type": n_type,
+                                                "distance": dist + 1,
+                                                "attributes": n_attrs
+                                            }
+                                    else:
+                                        # If the node is not deemed relevant, do not use it to traverse further!
+                                        continue
                                     
                                     if traverse_types is not None:
 
@@ -325,7 +403,9 @@ class SearchEngine:
             "message": attrs.get("message", "No message"),
             "author": attrs.get("author_name", attrs.get("author", "Unknown")),
             "date": attrs.get("timestamp", attrs.get("date", "Unknown")),
-            "relevance": 0,
+            "relevance": 0.0,
+            "keyword_matches": {},
+            "semantic_matches": 0,
             "connections": {},
             "reasons": []
         }
