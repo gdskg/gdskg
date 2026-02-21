@@ -8,6 +8,7 @@ from core.vector_store import VectorStore
 from analysis.embedder import ONNXEmbedder
 
 app = typer.Typer(help="Git-Derived Software Knowledge Graph CLI")
+
 console = Console()
 
 @app.command()
@@ -415,72 +416,48 @@ def serve(
     g_path = graph if graph else DEFAULT_GRAPH_PATH
     db_path = g_path / "gdskg.db"
     
+    # Force global console to stderr if serving via stdio to avoid corrupting the pipe
+    if transport.lower() == "stdio":
+        global console
+        console = Console(stderr=True)
+        # Also backup stdout and redirect it to stderr for this process
+        # This catches any accidental 'print()' calls from dependencies
+        _real_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        # We'll restore it just before calling mcp.run() which handles its own transport
+    
     if not db_path.exists():
         console.print(f"[yellow]Database not found at {db_path}[/yellow]")
-        
         # Check if we have env vars to auto-build
         repo_env = os.environ.get("GDSKG_REPO")
         if repo_env:
             console.print(f"Auto-building graph for [blue]{repo_env}[/blue]...")
             
-            # Extract configuration from environment
             overwrite_env = os.environ.get("GDSKG_OVERWRITE", "false").lower() == "true"
             plugins_env = os.environ.get("GDSKG_PLUGINS", "").split(",")
             plugins_list = [p.strip() for p in plugins_env if p.strip()]
             
             try:
-                # Import inside to avoid circular dependencies
-                # We reuse the build logic directly
-                # Note: We pass None for progress if we're in stdio mode to avoid corrupting the stream
-                use_progress = transport.lower() != "stdio"
+                import subprocess
+                build_cmd = [sys.executable, __file__, "build", "--repository", repo_env, "--graph", str(g_path)]
+                if overwrite_env:
+                    build_cmd.append("--overwrite")
+                for p in plugins_list:
+                    build_cmd.extend(["--plugin", p])
                 
-                # To avoid complex Typer context issues, we'll implement a clean call to the build logic
-                # We need to make sure build is defined or accessible. 
-                # Since we are inside serve(), we can just import the logic needed.
-                
-                # Redirecting logic from build()
-                from core.graph_store import GraphStore
-                from core.extractor import GraphExtractor
-                from core.plugin_manager import PluginManager
-                from core.vector_store import VectorStore
-                from analysis.embedder import ONNXEmbedder
-                
-                # Setup path
-                if repo_env.startswith("http"):
-                    # Use same cloning logic as build()
-                    # (To keep it DRY, we'd ideally refactor build into a helper)
-                    # For now, let's just trigger a subprocess call to gdskg build if we're in a real CLI
-                    # but since we want it to be robust in Docker, we'll use a subprocess call to our own entrypoint
-                    import subprocess
-                    build_cmd = [sys.executable, __file__, "build", "--repository", repo_env, "--graph", str(g_path)]
-                    if overwrite_env:
-                        build_cmd.append("--overwrite")
-                    for p in plugins_list:
-                        build_cmd.extend(["--plugin", p])
-                    
-                    console.print(f"Running build command: {' '.join(build_cmd)}")
-                    subprocess.run(build_cmd, check=True)
-                else:
-                    # Local path
-                    import subprocess
-                    build_cmd = [sys.executable, __file__, "build", "--repository", repo_env, "--graph", str(g_path)]
-                    if overwrite_env:
-                        build_cmd.append("--overwrite")
-                    for p in plugins_list:
-                        build_cmd.extend(["--plugin", p])
-                    
-                    console.print(f"Running build command: {' '.join(build_cmd)}")
-                    subprocess.run(build_cmd, check=True)
+                console.print(f"Running build command: {' '.join(build_cmd)}")
+                # CRITICAL: Redirect subprocess output to stderr to avoid corrupting stdio transport
+                subprocess.run(build_cmd, check=True, stdout=sys.stderr, stderr=sys.stderr)
                 
                 console.print("[bold green]✓ Auto-build complete.[/bold green]")
             except Exception as e:
                 console.print(f"[bold red]✗ Auto-build failed:[/bold red] {e}")
-                # We continue anyway, as the server might still be useful for other things
-                # or the user might index manually later.
         else:
             console.print("[yellow]Warning: Starting server without an existing database. Most tools will fail until you index a repository.[/yellow]")
 
     if transport.lower() == "stdio":
+        # Restore stdout so mcp.run() can use it for JSON-RPC
+        sys.stdout = _real_stdout
         mcp.run(transport="stdio")
     else:
         import uvicorn

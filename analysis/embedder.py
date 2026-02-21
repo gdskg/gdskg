@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from typing import List
 import numpy as np
@@ -28,7 +29,7 @@ class ONNXEmbedder:
             return
             
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Downloading model {self.MODEL_ID} to {self.model_dir}...")
+        print(f"Downloading model {self.MODEL_ID} to {self.model_dir}...", file=sys.stderr)
         
         from huggingface_hub import hf_hub_download
         
@@ -40,7 +41,7 @@ class ONNXEmbedder:
         import shutil
         shutil.copy(quantized_path, self.onnx_path)
         
-        print("Download complete.")
+        print("Download complete.", file=sys.stderr)
 
     def _load(self):
         """Loads tokenizer and ONNX session into memory."""

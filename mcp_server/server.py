@@ -517,5 +517,5 @@ if __name__ == "__main__":
         allow_headers=["*"],
     )
     
-    print("Starting GDSKG MCP Server (Robust Direct)")
+    print("Starting GDSKG MCP Server", file=sys.stderr)
     uvicorn.run(app, host="0.0.0.0", port=8015, log_level="info")
