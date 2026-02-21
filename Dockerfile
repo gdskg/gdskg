@@ -22,8 +22,14 @@ COPY mcp_server/ ./mcp_server/
 COPY plugins/ ./plugins/
 COPY VERSION .
 
-# Define environment variable
+# Define environment variables
 ENV PYTHONUNBUFFERED=1
+ENV GDSKG_VECTOR_DB_DIR=/app/vector_db
+
+# Create vector DB directory and define as volume
+RUN mkdir -p /app/vector_db
+VOLUME ["/app/vector_db"]
+
 ENV GIT_PYTHON_GIT_EXECUTABLE=/usr/bin/git
 ENV GIT_PYTHON_REFRESH=quiet
 

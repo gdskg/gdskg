@@ -169,7 +169,7 @@ def build(
             # Semantic Indexing
             embed_task = progress.add_task("[cyan]Semantic indexing...", total=None)
             
-            vstore = VectorStore(db_path)
+            vstore = VectorStore()
             embedder = ONNXEmbedder()
             
             def update_embed_progress(count, total=None):
@@ -215,11 +215,11 @@ def query(
     ),
     min_score: float = typer.Option(
         0.0, "--min-score", "-M",
-        help="Minimum relevance score to include in results"
+        help="(Advanced/Internal) Minimum relevance threshold. WARNING: Modifying this is highly discouraged and will likely hide valid results."
     ),
     top_n: int = typer.Option(
         5, "--top-n", "-N",
-        help="Maximum number of base commits to return"
+        help="Maximum number of base commits to return. INCREASE this value (e.g., 10 or 20) if you want a larger, more comprehensive set of results!"
     ),
     plugins: Optional[List[str]] = typer.Option(
         None, "--runtime-plugin",
@@ -235,7 +235,7 @@ def query(
     ),
     show_matches: bool = typer.Option(
         False, "--show-matches",
-        help="Show detailed explanation of why each result matched"
+        help="(Advanced/Debug) Show detailed explanations of matches. Unappealing for AI output as it clutters context."
     ),
     all_matches: bool = typer.Option(
         False, "--all-matches",

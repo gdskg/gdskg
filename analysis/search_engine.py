@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import os
 from pathlib import Path
 from typing import List, Dict, Any, Set, Optional
 from core.schema import NodeType, EdgeType
@@ -19,11 +20,16 @@ class SearchEngine:
 
         Args:
             db_path (str): The file path to the SQLite database.
-            vector_db_path (str, optional): Path to the vector database. Defaults to the same as db_path.
+            vector_db_path (str, optional): Path to the vector database. Defaults to ~/.gdskg/vector_db/gdskg_vectors.db.
         """
 
         self.db_path = db_path
-        self.vector_db_path = vector_db_path or db_path
+        if vector_db_path:
+            self.vector_db_path = vector_db_path
+        else:
+            vector_dir = Path(os.environ.get("GDSKG_VECTOR_DB_DIR", Path.home() / ".gdskg" / "vector_db"))
+            vector_dir.mkdir(parents=True, exist_ok=True)
+            self.vector_db_path = str(vector_dir / "gdskg_vectors.db")
 
     def search(self, query: str = "", repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5, filters: Dict[str, str] = None, all_matches: bool = False, all_files: bool = False) -> List[Dict[str, Any]]:
         """

@@ -107,24 +107,29 @@ def query_knowledge_graph(
     filters: Optional[List[str]] = None,
 ) -> str:
     """
-    Query the Git-Derived Software Knowledge Graph using natural language or keywords.
+    Query the Git-Derived Software Knowledge Graph to discover code architecture, history, and relationships.
+    
+    This is your primary tool for exploring a codebase's history. It performs a powerful hybrid search 
+    (semantic embeddings + keyword matching) across commits, files, functions, and symbols, then traverses 
+    relationships to give you a deep picture of the code. Use this whenever the user asks about how things 
+    were built, who changed what, or to find conceptually similar code across a repository.
     
     Args:
-        query: The search query string.
+        query: Your search query. Use natural language to describe what you're looking for (e.g. "authentication logic", "how are database connections pooled").
         graph_path: Path to the knowledge graph SQLite database directory. Defaults to './gdskg_graph'.
-        limit: Maximum number of results to return.
-        depth: Traversal depth for finding related nodes (0=direct matches only, 1=immediate neighbors, 2+=deeper). Default 2.
-        traverse_types: Optional list of node types to traverse through (e.g., ['File', 'Symbol']). Restricts which relationship types are followed during depth search.
-        repo_name: Optional repository name to scope the search to.
-        semantic_only: If True, uses semantic search exclusively and ignores keywords.
-        min_score: Minimum relevance score to include in results.
-        top_n: Maximum number of base commits to return.
-        plugins: Optional list of plugins to enable (e.g., ['GitHubPR']).
-        parameters: Optional list of plugin parameters in format 'PluginName:Key=Value'.
-        filters: Optional list of filters in format 'Type:Value' (e.g., ['AUTHOR:dan']).
+        limit: Maximum number of final output strings to return to avoid context overflow.
+        depth: Traversal depth for finding related nodes (0=direct matches only, 1=immediate neighbors, 2+=deeper API tracing). Default is 2.
+        traverse_types: Optional list of node types to traverse through (e.g., ['File', 'Symbol']). Restricts which relationship types are followed.
+        repo_name: Optional repository name to scope the search to if multiple are indexed.
+        semantic_only: If True, uses semantic search exclusively and ignores keywords. Useful when looking for abstract concepts.
+        min_score: (Advanced/Internal) Minimum relevance threshold. WARNING: Do NOT modify this value. Changing this is highly discouraged and will likely hide valid results.
+        top_n: Maximum number of base commits to seed the search. INCREASE this value (e.g., 10 or 20) if you want a larger, more comprehensive set of results!
+        plugins: Optional list of runtime plugins to execute on the results (e.g., ['GitHubPR']). It is safe and non-blocking to use these even if API authentication is not set up—they will simply return a warning without crashing. Use them!
+        parameters: Optional list of plugin parameters in format 'PluginName:Key=Value' (e.g., ['GitHubPR:token=123']).
+        filters: Optional list of strict metadata filters in format 'Type:Value' (e.g., ['AUTHOR:john']).
         
     Returns:
-        A formatted string containing the search results.
+        A rich, formatted string containing commits, reasons for matching, and all traversed related components.
     """
     if not _read_server_status():
         return "Server is stopped. Please start the server first."
@@ -133,7 +138,7 @@ def query_knowledge_graph(
     db_path = graph_dir / "gdskg.db"
     
     if not db_path.exists():
-        return f"Error: Database not found at {db_path}. Please index a repository first."
+        return f"Warning: Knowledge Graph Database not found at '{db_path}'. You MUST use the `index_repository` tool first to build the graph before you can use the query tool."
 
     try:
         from analysis.search_engine import SearchEngine
@@ -337,7 +342,7 @@ def index_repository(
         node_count = store.count_nodes()
         store.close()
         
-        vector_store = VectorStore(db_path)
+        vector_store = VectorStore()
         embedder = ONNXEmbedder()
         embedded_count = vector_store.build_from_graph(str(db_path), embedder)
         vector_store.close()

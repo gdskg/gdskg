@@ -12,8 +12,15 @@ class VectorStore:
     Persistent storage for node embeddings using SQLite and numpy for similarity matching.
     """
     
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[Path] = None):
+        if db_path is None:
+            vector_dir = Path(os.environ.get("GDSKG_VECTOR_DB_DIR", Path.home() / ".gdskg" / "vector_db"))
+            vector_dir.mkdir(parents=True, exist_ok=True)
+            self.db_path = vector_dir / "gdskg_vectors.db"
+        elif db_path.is_dir():
+            self.db_path = db_path / "gdskg_vectors.db"
+        else:
+            self.db_path = db_path
         self._init_db()
         
     def _init_db(self) -> None:

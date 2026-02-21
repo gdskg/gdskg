@@ -76,7 +76,7 @@ def test_query_no_results(test_dirs):
     graph_path.mkdir(exist_ok=True)
     # If no db, query returns error
     result = query_knowledge_graph("missing", graph_path=str(graph_path))
-    assert "Error: Database not found" in result
+    assert "Warning: Knowledge Graph Database not found" in result
 
     # Create empty db? No, index_repository handles creation. 
     # Let's index then query garbage.
