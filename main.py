@@ -27,12 +27,16 @@ def build(
         help="Overwrite existing graph database if it exists"
     ),
     plugins: Optional[List[str]] = typer.Option(
-        None, "--plugin", "-P",
-        help="List of plugins to enable (e.g., 'python-complexity'). Plugins must exist under https://github.com/gdskg/"
+        None, "--build-plugin",
+        help="List of plugins to run at build time (e.g., 'python-complexity'). Plugins must exist under https://github.com/gdskg/"
     ),
     parameters: Optional[List[str]] = typer.Option(
         None, "--parameter", "-X",
         help="Plugin parameters in format 'PluginName:Key=Value' (e.g., 'ClickUpTask:regex=^CU-\\d+$')"
+    ),
+    include_bots: bool = typer.Option(
+        False, "--include-bots",
+        help="Include commits authored by bots (skipped by default)"
     )
 ):
     """
@@ -154,7 +158,7 @@ def build(
         transient=True
     ) as progress:
         extractor = GraphExtractor(repo_path, store, plugins=loaded_plugins, plugin_config=plugin_config, 
-                                   progress=progress, task_id=None)
+                                   progress=progress, task_id=None, skip_bots=not include_bots)
         
         try:
             extractor.process_repo()
@@ -218,8 +222,8 @@ def query(
         help="Maximum number of base commits to return"
     ),
     plugins: Optional[List[str]] = typer.Option(
-        None, "--plugin", "-P",
-        help="List of plugins to enable (e.g., 'GitHubPR')."
+        None, "--runtime-plugin",
+        help="List of plugins to run at runtime (e.g., 'GitHubPR')."
     ),
     parameters: Optional[List[str]] = typer.Option(
         None, "--parameter", "-X",
@@ -380,8 +384,8 @@ def history(
         exists=True, file_okay=False, dir_okay=True, resolve_path=True
     ),
     plugins: Optional[List[str]] = typer.Option(
-        None, "--plugin", "-P",
-        help="List of plugins to enable (e.g., 'GitHubPR')."
+        None, "--runtime-plugin",
+        help="List of plugins to run at runtime (e.g., 'GitHubPR')."
     ),
     parameters: Optional[List[str]] = typer.Option(
         None, "--parameter", "-X",
@@ -432,18 +436,20 @@ def serve(
         repo_env = os.environ.get("GDSKG_REPO")
         if repo_env:
             console.print(f"Auto-building graph for [blue]{repo_env}[/blue]...")
-            
             overwrite_env = os.environ.get("GDSKG_OVERWRITE", "false").lower() == "true"
             plugins_env = os.environ.get("GDSKG_PLUGINS", "").split(",")
             plugins_list = [p.strip() for p in plugins_env if p.strip()]
+            include_bots_env = os.environ.get("GDSKG_INCLUDE_BOTS", "false").lower() == "true"
             
             try:
                 import subprocess
                 build_cmd = [sys.executable, __file__, "build", "--repository", repo_env, "--graph", str(g_path)]
                 if overwrite_env:
                     build_cmd.append("--overwrite")
+                if include_bots_env:
+                    build_cmd.append("--include-bots")
                 for p in plugins_list:
-                    build_cmd.extend(["--plugin", p])
+                    build_cmd.extend(["--build-plugin", p])
                 
                 console.print(f"Running build command: {' '.join(build_cmd)}")
                 # CRITICAL: Redirect subprocess output to stderr to avoid corrupting stdio transport

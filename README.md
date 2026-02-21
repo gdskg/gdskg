@@ -66,13 +66,14 @@ Some GDSKG plugins require environment variables for authentication with externa
 ## Usage Guide
 
 ### 1. Build the Intelligence Graph
-Analyze a repository to generate a local SQLite-backed knowledge graph.
+Analyze a repository to generate a local SQLite-backed knowledge graph. Note: Commits from bot authors (e.g. `[bot]`) are skipped by default but can be included.
 
 ```bash
 python main.py build \
   --repository /path/to/local/project \
   --graph ./graph_output \
-  --overwrite
+  --overwrite \
+  --include-bots
 ```
 
 ### 2. Query for Insights
@@ -97,15 +98,16 @@ GDSKG provides an MCP (Model Context Protocol) server to allow AI assistants to 
 
 ### Tools
 
-#### `index_folder`
-Indexes a local git repository into the knowledge graph. Supports all functionality available in the CLI.
+#### `index_repository`
+Indexes a git repository (local folder or remote URL) into the knowledge graph. Supports all functionality available in the CLI.
 
 **Parameters:**
-- `path` (str): Absolute path to the local git repository.
+- `repository` (str): Path or URL to the git repository.
 - `graph_path` (str, optional): Directory to store the graph DB. Defaults to `./gdskg_graph`.
 - `overwrite` (bool, optional): Overwrite existing database. Default `False`.
 - `plugins` (List[str], optional): List of plugins to enable (e.g., `["GitHubPR", "ClickUpTask"]`).
-- `parameters` (List[str], optional): Plugin configuration in format `["Plugin:Key=Value"]`.
+- `parameters` (List[str], optional): Plugin configuration in format `["PluginName:Key=Value"]`.
+- `include_bots` (bool, optional): If True, include commits authored by bots (skipped by default).
 
 #### `query_knowledge_graph`
 Queries the knowledge graph using natural language.
@@ -181,18 +183,23 @@ make clean
 
 ## Plugins
 
-GDSKG supports a plugin system to enrich the graph with external data. Plugins are located in the `plugins/` directory.
+GDSKG supports a plugin system to enrich the graph with external data. Plugins are located in the `plugins/` directory and can be executed at **build time** (during extraction) or **runtime** (during querying/serving), depending on how you invoke them.
 
 ### Available Plugins
 
 - **`GitHubPR`**: Enriches the graph with GitHub Pull Request data.
 - **`ClickUpTask`**: Enriches the graph with ClickUp task data.
 
+### Using Plugins via CLI
+You can specify whether plugins run during the graph generation or at request time:
+- Use `--build-plugin PluginName` for the `build` command.
+- Use `--runtime-plugin PluginName` for the `query` or `serve` commands.
+
 ### Using Plugins via MCP
-To enable plugins when indexing via MCP, provide the `plugins` and `parameters` arguments:
+To enable runtime or build plugins via MCP, provide the `plugins` and `parameters` arguments:
 ```json
 {
-  "path": "/absolute/path/to/repo",
+  "repository": "/absolute/path/to/repo",
   "plugins": ["GitHubPR"],
   "parameters": ["GitHubPR:token=ghp_your_token_here"]
 }

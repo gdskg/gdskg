@@ -206,7 +206,8 @@ def index_repository(
     graph_path: str = str(DEFAULT_GRAPH_PATH), 
     overwrite: bool = False,
     plugins: list[str] = None,
-    parameters: list[str] = None
+    parameters: list[str] = None,
+    include_bots: bool = False
 ) -> str:
     """
     Index a git repository (local folder or remote URL) into the knowledge graph.
@@ -217,6 +218,7 @@ def index_repository(
         overwrite: If True, overwrites the existing graph database.
         plugins: Optional list of plugins to enable (e.g., ['GitHubPR']).
         parameters: Optional list of plugin parameters in format 'PluginName:Key=Value'.
+        include_bots: If True, include commits authored by bots (skipped by default).
         
     Returns:
         Success message with node count or error message.
@@ -328,8 +330,7 @@ def index_repository(
                         plugin_config[plugin_part][key] = value
                 except Exception:
                     pass 
-        
-        extractor = GraphExtractor(repo_path, store, plugins=loaded_plugins, plugin_config=plugin_config)
+        extractor = GraphExtractor(repo_path, store, plugins=loaded_plugins, plugin_config=plugin_config, skip_bots=not include_bots)
 
         
         extractor.process_repo()

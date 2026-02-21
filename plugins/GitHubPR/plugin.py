@@ -10,8 +10,6 @@ from core.schema import Node, Edge, NodeType
 logger = logging.getLogger(__name__)
 
 class GitHubPlugin(PluginInterface):
-    plugin_type = "runtime"
-    
     def __init__(self):
         self.pat = os.environ.get("GITHUB_PAT") or os.environ.get("GITHUB_TOKEN")
         self.enabled = True
@@ -59,7 +57,7 @@ class GitHubPlugin(PluginInterface):
         matches = re.findall(r"#(\d+)", message)
         
         for pr_num in matches:
-            pr_node_id = f"PR:{owner}/{repo}#{pr_num}"
+            pr_node_id = f"PR:{owner}/{repo_name}#{pr_num}"
             if any(n.id == pr_node_id for n in related_nodes):
                 continue
             self._process_pr(owner, repo_name, pr_num, commit_node, graph_api)

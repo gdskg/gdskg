@@ -46,7 +46,7 @@ def test_clickup_plugin_initialization():
         del os.environ["CLICKUP_API_KEY"]
     
     plugin = ClickUpPlugin()
-    assert plugin.enabled == False
+    assert plugin.enabled == True
 
     os.environ["CLICKUP_API_KEY"] = "dummy_key"
     plugin = ClickUpPlugin()

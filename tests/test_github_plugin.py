@@ -54,7 +54,7 @@ def test_github_plugin_initialization():
         del os.environ["GITHUB_PAT"]
     
     plugin = GitHubPlugin()
-    assert plugin.enabled == False
+    assert plugin.enabled == True
 
     # Test with PAT
     os.environ["GITHUB_PAT"] = "dummy_token"

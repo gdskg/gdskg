@@ -33,7 +33,8 @@ class GraphExtractor:
     """
 
     def __init__(self, repo_path: Path, graph_store: GraphStore, plugins: List[PluginInterface] = None, 
-                 plugin_config: Dict[str, Dict[str, Any]] = None, progress=None, task_id=None):
+                 plugin_config: Dict[str, Dict[str, Any]] = None, progress=None, task_id=None,
+                 skip_bots: bool = True):
         """
         Initialize the GraphExtractor.
 
@@ -57,6 +58,7 @@ class GraphExtractor:
         self.plugin_config = plugin_config or {}
         self.progress = progress
         self.task_id = task_id
+        self.skip_bots = skip_bots
         
         import collections
         self.term_counts = collections.Counter()
@@ -125,19 +127,36 @@ class GraphExtractor:
         current_diffs = None
         in_message = False
         message_buffer = []
+        skip_current_commit = False
 
         for line in log_process.stdout:
             if line.startswith('^C^'):
                 # Handle previous diff
-                if current_diff is not None:
+                if not skip_current_commit and current_diff is not None:
                     current_diff['diff_lines'] = "".join(current_diff['diff_lines'])
                     current_diffs.append(current_diff)
+                
+                skip_current_commit = False
                 
                 # Parse header
                 raw = line[3:]
                 parts = raw.split('|~|', 8)
                 if len(parts) >= 9:
                     hexsha = parts[0]
+                    author_name = parts[3]
+                    
+                    bot_indicator = "[bot]" in author_name.lower() or "dependabot" in author_name.lower() or "greenkeeper" in author_name.lower()
+                    if self.skip_bots and bot_indicator:
+                        skip_current_commit = True
+                        if '^E^' not in parts[8]:
+                            in_message = True
+                        else:
+                            in_message = False
+                        current_commit = None
+                        current_diff = None
+                        current_diffs = None
+                        continue
+
                     commit_order.append(hexsha)
                     current_commit = hexsha
                     current_diff = None
@@ -164,12 +183,17 @@ class GraphExtractor:
 
             if in_message:
                 if '^E^' in line:
-                    msg_part = line.split('^E^')[0]
-                    message_buffer.append(msg_part)
-                    commit_meta[current_commit]['message'] = "".join(message_buffer).strip()
+                    if not skip_current_commit:
+                        msg_part = line.split('^E^')[0]
+                        message_buffer.append(msg_part)
+                        commit_meta[current_commit]['message'] = "".join(message_buffer).strip()
                     in_message = False
                 else:
-                    message_buffer.append(line)
+                    if not skip_current_commit:
+                        message_buffer.append(line)
+                continue
+
+            if skip_current_commit:
                 continue
 
             if line.startswith(':'):
@@ -203,7 +227,7 @@ class GraphExtractor:
             elif current_diff is not None:
                 current_diff['diff_lines'].append(line)
         
-        if current_commit and current_diff is not None:
+        if not skip_current_commit and current_commit and current_diff is not None:
             current_diff['diff_lines'] = "".join(current_diff['diff_lines'])
             current_diffs.append(current_diff)
             

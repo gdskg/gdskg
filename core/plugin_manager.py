@@ -181,7 +181,7 @@ def run_runtime_plugins(db_path: str, commit_ids: List[str], plugins: List[str],
         print(f"Error loading plugins: {e}")
         return
 
-    loaded_plugins = [p for p in plugin_manager.get_plugins() if getattr(p, 'plugin_type', 'build') == 'runtime']
+    loaded_plugins = plugin_manager.get_plugins()
 
     if loaded_plugins:
         # store = GraphStore(db_path) expects Path object

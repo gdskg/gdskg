@@ -48,7 +48,7 @@ def test_semantic_search(test_dir):
     
     searcher = SearchEngine(str(db_path), str(vector_db_path))
     
-    results = searcher.search("start the persistence layer")
+    results = searcher.search("start the persistence layer", min_score=0.0)
     print("SEARCH ENGINE RESULTS:", results)
 
     

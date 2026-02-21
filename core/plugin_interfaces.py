@@ -46,8 +46,6 @@ class PluginInterface(ABC):
     enabling enrichment of the graph with metadata from external sources or
     custom analysis.
     """
-    
-    plugin_type: str = "build"  # Either 'build' or 'runtime'
 
     @abstractmethod
     def process(self, commit_node: Node, related_nodes: List[Node], related_edges: List[Edge], graph_api: GraphInterface, config: Dict[str, Any] = None) -> None:

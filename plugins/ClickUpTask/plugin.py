@@ -10,8 +10,6 @@ from core.schema import Node, Edge, NodeType
 logger = logging.getLogger(__name__)
 
 class ClickUpPlugin(PluginInterface):
-    plugin_type = "runtime"
-    
     def __init__(self):
         self.api_key = os.environ.get("CLICKUP_API_KEY")
         self.enabled = True
