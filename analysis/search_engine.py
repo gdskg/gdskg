@@ -44,14 +44,13 @@ class SearchEngine:
         query = query or ""
 
 
-        if semantic_only:
-            keywords = []
-        else:
-            stop_words = {'the', 'and', 'for', 'how', 'to', 'of', 'in', 'is', 'a', 'with', 'that', 'this', 'or'}
-            raw_keywords = query.lower().split()
-            keywords = [kw for kw in raw_keywords if kw not in stop_words]
-            if not keywords: # Fallback to all if everything is a stop word
-                keywords = raw_keywords
+        from analysis.keyword_extractor import KeywordExtractor
+        extractor = KeywordExtractor()
+        stop_words = extractor.stop_words
+        raw_keywords = query.lower().split()
+        keywords = [kw for kw in raw_keywords if kw not in stop_words]
+        if not keywords: # Fallback to all if everything is a stop word
+            keywords = raw_keywords
 
         commits = {}
         
@@ -116,7 +115,8 @@ class SearchEngine:
 
 
             # 1. Search ALL nodes for keywords
-            for kw in keywords:
+            search_keywords = [] if semantic_only else keywords
+            for kw in search_keywords:
                 # Search across various node types and common attributes (name, message, content, id)
                 cursor.execute("""
                     SELECT id, type, attributes FROM nodes 
