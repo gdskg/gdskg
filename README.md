@@ -30,7 +30,6 @@ If you've ever asked:
 - **Intelligent Graph Traversal**: Uses Graph + Vector Search to trace how concepts relate. Find a keyword, trace it to a commit, trace the commit to a PR, then trace it to the author—all automatically linked!
 - **Deep Semantic Search**: AI-powered natural language queries to find concepts (e.g., "rate limiting logic") even if the exact keywords aren't present.
 - **AST-Level Diffing**: Knows the difference between *modifying* a function, *calling* a function, and *deleting* a class.
-- **Language Support**: Deep support for **Python**, **TypeScript**, and **TSX/JSX** (with more parser extensions coming), and fallback keyword detection for all other file types.
 
 ---
 
