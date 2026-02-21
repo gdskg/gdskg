@@ -232,6 +232,10 @@ def query(
     filters: Optional[List[str]] = typer.Option(
         None, "--filter", "-F",
         help="Filter results by node type and value in format 'Type:Value' (e.g., 'AUTHOR:dan', 'TIME_BUCKET:2024-01')."
+    ),
+    show_matches: bool = typer.Option(
+        False, "--show-matches",
+        help="Show detailed explanation of why each result matched"
     )
 ):
     """
@@ -285,7 +289,7 @@ def query(
         detail.append(f"Date: ", style="dim")
         detail.append(f"{res['date'][:10]}\n", style="green")
 
-        if res.get('reasons'):
+        if show_matches and res.get('reasons'):
             detail.append("Matched because:\n", style="bold cyan")
             for reason in res['reasons']:
                 detail.append(f" • {reason}\n", style="dim cyan")
