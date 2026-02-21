@@ -24,8 +24,11 @@
             "_comment": "Standalone binary (built via 'make build'). No Docker required.",
             "command": "./dist/gdskg-mcp",
             "args": [
+                "serve",
                 "--transport",
-                "stdio"
+                "stdio",
+                "--graph",
+                "<YOUR_GRAPH_OUTPUT_DIR>"
             ],
             "env": {
                 "GITHUB_PAT": "<FINE_GRAIN_PAT>"
