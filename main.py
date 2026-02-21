@@ -223,6 +223,10 @@ def query(
     parameters: Optional[List[str]] = typer.Option(
         None, "--parameter", "-X",
         help="Plugin parameters in format 'PluginName:Key=Value'."
+    ),
+    filters: Optional[List[str]] = typer.Option(
+        None, "--filter", "-F",
+        help="Filter results by node type and value in format 'Type:Value' (e.g., 'AUTHOR:dan', 'TIME_BUCKET:2024-01')."
     )
 ):
     """
@@ -240,8 +244,16 @@ def query(
     if plugins:
         depth = max(depth, 1)
 
+    # Parse filters
+    parsed_filters = {}
+    if filters:
+        for f in filters:
+            if ":" in f:
+                ftype, fval = f.split(":", 1)
+                parsed_filters[ftype.upper()] = fval
+
     searcher = SearchEngine(str(db_path)) # Uses shared DB for vectors by default
-    results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only, min_score=min_score, top_n=top_n)
+    results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only, min_score=min_score, top_n=top_n, filters=parsed_filters)
 
     if plugins and results:
         from core.plugin_manager import run_runtime_plugins
@@ -387,13 +399,87 @@ def history(
 def serve(
     transport: str = typer.Option("sse", "--transport", "-t", help="Transport protocol: 'sse' (default) or 'stdio'"),
     port: int = typer.Option(8015, "--port", "-p", help="Port to listen on (SSE only)"),
-    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Host to listen on (SSE only)")
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Host to listen on (SSE only)"),
+    graph: Path = typer.Option(
+        None, "--graph", "-G",
+        help="Directory where the knowledge graph (SQLite db) is stored",
+        file_okay=False, dir_okay=True, resolve_path=True
+    )
 ):
     """
     Start the MCP server.
     """
-    from mcp_server.server import mcp
+    from mcp_server.server import mcp, DEFAULT_GRAPH_PATH
     
+    # Determine graph path
+    g_path = graph if graph else DEFAULT_GRAPH_PATH
+    db_path = g_path / "gdskg.db"
+    
+    if not db_path.exists():
+        console.print(f"[yellow]Database not found at {db_path}[/yellow]")
+        
+        # Check if we have env vars to auto-build
+        repo_env = os.environ.get("GDSKG_REPO")
+        if repo_env:
+            console.print(f"Auto-building graph for [blue]{repo_env}[/blue]...")
+            
+            # Extract configuration from environment
+            overwrite_env = os.environ.get("GDSKG_OVERWRITE", "false").lower() == "true"
+            plugins_env = os.environ.get("GDSKG_PLUGINS", "").split(",")
+            plugins_list = [p.strip() for p in plugins_env if p.strip()]
+            
+            try:
+                # Import inside to avoid circular dependencies
+                # We reuse the build logic directly
+                # Note: We pass None for progress if we're in stdio mode to avoid corrupting the stream
+                use_progress = transport.lower() != "stdio"
+                
+                # To avoid complex Typer context issues, we'll implement a clean call to the build logic
+                # We need to make sure build is defined or accessible. 
+                # Since we are inside serve(), we can just import the logic needed.
+                
+                # Redirecting logic from build()
+                from core.graph_store import GraphStore
+                from core.extractor import GraphExtractor
+                from core.plugin_manager import PluginManager
+                from core.vector_store import VectorStore
+                from analysis.embedder import ONNXEmbedder
+                
+                # Setup path
+                if repo_env.startswith("http"):
+                    # Use same cloning logic as build()
+                    # (To keep it DRY, we'd ideally refactor build into a helper)
+                    # For now, let's just trigger a subprocess call to gdskg build if we're in a real CLI
+                    # but since we want it to be robust in Docker, we'll use a subprocess call to our own entrypoint
+                    import subprocess
+                    build_cmd = [sys.executable, __file__, "build", "--repository", repo_env, "--graph", str(g_path)]
+                    if overwrite_env:
+                        build_cmd.append("--overwrite")
+                    for p in plugins_list:
+                        build_cmd.extend(["--plugin", p])
+                    
+                    console.print(f"Running build command: {' '.join(build_cmd)}")
+                    subprocess.run(build_cmd, check=True)
+                else:
+                    # Local path
+                    import subprocess
+                    build_cmd = [sys.executable, __file__, "build", "--repository", repo_env, "--graph", str(g_path)]
+                    if overwrite_env:
+                        build_cmd.append("--overwrite")
+                    for p in plugins_list:
+                        build_cmd.extend(["--plugin", p])
+                    
+                    console.print(f"Running build command: {' '.join(build_cmd)}")
+                    subprocess.run(build_cmd, check=True)
+                
+                console.print("[bold green]✓ Auto-build complete.[/bold green]")
+            except Exception as e:
+                console.print(f"[bold red]✗ Auto-build failed:[/bold red] {e}")
+                # We continue anyway, as the server might still be useful for other things
+                # or the user might index manually later.
+        else:
+            console.print("[yellow]Warning: Starting server without an existing database. Most tools will fail until you index a repository.[/yellow]")
+
     if transport.lower() == "stdio":
         mcp.run(transport="stdio")
     else:

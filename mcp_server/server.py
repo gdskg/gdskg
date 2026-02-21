@@ -104,6 +104,7 @@ def query_knowledge_graph(
     top_n: int = 5,
     plugins: Optional[List[str]] = None,
     parameters: Optional[List[str]] = None,
+    filters: Optional[List[str]] = None,
 ) -> str:
     """
     Query the Git-Derived Software Knowledge Graph using natural language or keywords.
@@ -120,6 +121,7 @@ def query_knowledge_graph(
         top_n: Maximum number of base commits to return.
         plugins: Optional list of plugins to enable (e.g., ['GitHubPR']).
         parameters: Optional list of plugin parameters in format 'PluginName:Key=Value'.
+        filters: Optional list of filters in format 'Type:Value' (e.g., ['AUTHOR:dan']).
         
     Returns:
         A formatted string containing the search results.
@@ -137,8 +139,16 @@ def query_knowledge_graph(
         from analysis.search_engine import SearchEngine
         from core.schema import NodeType
 
+        # Parse filters
+        parsed_filters = {}
+        if filters:
+            for f in filters:
+                if ":" in f:
+                    ftype, fval = f.split(":", 1)
+                    parsed_filters[ftype.upper()] = fval
+
         searcher = SearchEngine(str(db_path))
-        results = searcher.search(query, repo_name=repo_name, depth=depth, traverse_types=traverse_types, semantic_only=semantic_only, min_score=min_score, top_n=top_n)
+        results = searcher.search(query, repo_name=repo_name, depth=depth, traverse_types=traverse_types, semantic_only=semantic_only, min_score=min_score, top_n=top_n, filters=parsed_filters)
         
         if plugins and results:
             from core.plugin_manager import run_runtime_plugins

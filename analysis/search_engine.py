@@ -24,7 +24,7 @@ class SearchEngine:
         self.db_path = db_path
         self.vector_db_path = vector_db_path or db_path
 
-    def search(self, query: str, repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5) -> List[Dict[str, Any]]:
+    def search(self, query: str = "", repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5, filters: Dict[str, str] = None) -> List[Dict[str, Any]]:
         """
         Search for relevant commits based on keywords and traverse the graph.
 
@@ -39,6 +39,9 @@ class SearchEngine:
             List[Dict[str, Any]]: A list of matching commits with their metadata and connections, 
                 sorted by relevance.
         """
+        
+        query = query or ""
+
 
         if semantic_only:
             keywords = []
@@ -70,80 +73,127 @@ class SearchEngine:
                 if not repo_ids:
                     return []
 
+            allowed_commits = None
+            if filters:
+                for f_type_raw, f_val in filters.items():
+                    f_type = f_type_raw.upper()
+                    
+                    cursor.execute("""
+                        SELECT id FROM nodes 
+                        WHERE type = ? AND (id LIKE ? OR json_extract(attributes, '$.name') LIKE ? OR json_extract(attributes, '$.content') LIKE ?)
+                    """, (f_type, f"%{f_val}%", f"%{f_val}%", f"%{f_val}%"))
+                    
+                    matched_filter_node_ids = [r[0] for r in cursor.fetchall()]
+                    if not matched_filter_node_ids:
+                        return []
+                        
+                    placeholders = ",".join(["?"] * len(matched_filter_node_ids))
+                    
+                    cursor.execute(f"""
+                        SELECT source_id FROM edges WHERE target_id IN ({placeholders}) AND source_id IN (SELECT id FROM nodes WHERE type=?)
+                        UNION
+                        SELECT target_id FROM edges WHERE source_id IN ({placeholders}) AND target_id IN (SELECT id FROM nodes WHERE type=?)
+                    """, matched_filter_node_ids + [NodeType.COMMIT.value] + matched_filter_node_ids + [NodeType.COMMIT.value])
+                    
+                    commits_for_filter = {r[0] for r in cursor.fetchall()}
+                    if not commits_for_filter:
+                        return []
+                        
+                    if allowed_commits is None:
+                        allowed_commits = commits_for_filter
+                    else:
+                        allowed_commits.intersection_update(commits_for_filter)
+                        if not allowed_commits:
+                            return []
+
+            if allowed_commits is not None and not keywords and not query:
+                for cid in allowed_commits:
+                    self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
+                    if cid in commits:
+                        commits[cid]["relevance"] += 5
+                        commits[cid]["reasons"].append(f"Matched strict filters: {filters}")
+
+
+            # 1. Search ALL nodes for keywords
             for kw in keywords:
-
-                # 1. Search COMMIT nodes directly (message/id)
-                cursor.execute("""
-                    SELECT id, attributes FROM nodes 
-                    WHERE type = ? AND (id LIKE ? OR json_extract(attributes, '$.message') LIKE ?)
-                """, (NodeType.COMMIT.value, f"%{kw}%", f"%{kw}%"))
-                for row in cursor.fetchall():
-                    commit_id, attr_json = row
-                    self._ensure_commit_in_results(commits, commit_id, attr_json, repo_ids, cursor)
-                    if commit_id in commits:
-                        commits[commit_id]["relevance"] += 10
-                        commits[commit_id]["reasons"].append(f"Keyword '{kw}' found in commit metadata")
-
-                # 2. Search via KEYWORD nodes
-                cursor.execute("""
-                    SELECT n.id, n.attributes FROM nodes n
-                    JOIN edges e ON n.id = e.source_id
-                    JOIN nodes k ON e.target_id = k.id
-                    WHERE n.type = ? AND k.type = ? AND k.id = ?
-                """, (NodeType.COMMIT.value, NodeType.KEYWORD.value, f"KEYWORD:{kw}"))
-                for row in cursor.fetchall():
-                    commit_id, attr_json = row
-                    self._ensure_commit_in_results(commits, commit_id, attr_json, repo_ids, cursor)
-                    if commit_id in commits:
-                        commits[commit_id]["relevance"] += 8
-                        reasons = commits[commit_id]["reasons"]
-                        if f"Significant keyword '{kw}' found in change hunks" not in reasons:
-                            reasons.append(f"Significant keyword '{kw}' found in change hunks")
-
-                # 3. Search other node types
+                # Search across various node types and common attributes (name, message, content, id)
                 cursor.execute("""
                     SELECT id, type, attributes FROM nodes 
                     WHERE 
-                      (type = ? AND (id LIKE ? OR json_extract(attributes, '$.name') LIKE ?)) OR
-                      (type = ? AND id LIKE ?) OR
-                      (type = ? AND json_extract(attributes, '$.content') LIKE ?) OR
-                      (type = ? AND json_extract(attributes, '$.content') LIKE ?)
-                """, (
-                    NodeType.SYMBOL.value, f"%{kw}%", f"%{kw}%",
-                    NodeType.FILE.value, f"%{kw}%",
-                    NodeType.COMMIT_MESSAGE.value, f"%{kw}%",
-                    NodeType.COMMENT.value, f"%{kw}%"
-                ))
+                      id LIKE ? OR 
+                      json_extract(attributes, '$.name') LIKE ? OR 
+                      json_extract(attributes, '$.message') LIKE ? OR 
+                      json_extract(attributes, '$.content') LIKE ? OR
+                      json_extract(attributes, '$.author_name') LIKE ? OR
+                      json_extract(attributes, '$.author_email') LIKE ?
+                """, (f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%"))
                 
-                matched_rows = cursor.fetchall()
-                for node_id, n_type, n_attr_json in matched_rows:
-                    if n_type == NodeType.COMMIT_MESSAGE.value:
+                matched_nodes = cursor.fetchall()
+                for node_id, n_type, n_attr_json in matched_nodes:
+                    # If it's a COMMIT, score it directly
+                    if n_type == NodeType.COMMIT.value:
+                        if allowed_commits is not None and node_id not in allowed_commits:
+                            continue
+                        self._ensure_commit_in_results(commits, node_id, n_attr_json, repo_ids, cursor)
+                        if node_id in commits:
+                            commits[node_id]["relevance"] += 10
+                            commits[node_id]["reasons"].append(f"Keyword '{kw}' found in commit metadata")
+                    
+                    # If it's a KEYWORD node, find linked commits
+                    elif n_type == NodeType.KEYWORD.value:
                         cursor.execute("""
                             SELECT source_id FROM edges 
                             WHERE target_id = ? AND type = ?
-                        """, (node_id, EdgeType.HAS_MESSAGE.value))
-                        reason = f"Keyword '{kw}' found in commit message"
-                    elif n_type == NodeType.COMMENT.value:
-                        cursor.execute("""
-                            SELECT target_id FROM edges 
-                            WHERE source_id = ? AND type = ?
-                        """, (node_id, EdgeType.HAS_COMMENT.value))
-                        reason = f"Keyword '{kw}' found in code comment"
-                    else:
-                        cursor.execute("""
-                            SELECT target_id FROM edges 
-                            WHERE source_id = ? AND (type = ? OR type = ?)
-                        """, (node_id, EdgeType.MODIFIED_SYMBOL.value, EdgeType.MODIFIED_FILE.value))
-                        label = "symbol" if n_type == NodeType.SYMBOL.value else "file"
-                        reason = f"Keyword '{kw}' found in {label} '{node_id}'"
+                        """, (node_id, EdgeType.HAS_KEYWORD.value))
+                        for (cid,) in cursor.fetchall():
+                            if allowed_commits is not None and cid not in allowed_commits:
+                                continue
+                            self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
+                            if cid in commits:
+                                commits[cid]["relevance"] += 8
+                                rsn = f"Significant keyword '{kw}' found in change hunks"
+                                if rsn not in commits[cid]["reasons"]:
+                                    commits[cid]["reasons"].append(rsn)
+                                # Ensure trigger node is in connections
+                                commits[cid]["connections"][node_id] = {
+                                    "type": n_type,
+                                    "distance": 0, # Trigger node
+                                    "attributes": json.loads(n_attr_json) if n_attr_json else {}
+                                }
                     
-                    linked_commits = [r[0] for r in cursor.fetchall()]
-                    for cid in linked_commits:
-                        self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
-                        if cid in commits:
-                            commits[cid]["relevance"] += 5
-                            if reason not in commits[cid]["reasons"]:
-                                commits[cid]["reasons"].append(reason)
+                    # For other types, find linked commits via various edge types
+                    else:
+                        # Find commits that are "related" to this node within 1 step
+                        # This covers: MODIFIED_FILE, MODIFIED_SYMBOL, MODIFIED_FUNCTION, HAS_MESSAGE, AUTHORED_BY, etc.
+                        cursor.execute("""
+                            SELECT source_id FROM edges WHERE target_id = ?
+                            UNION
+                            SELECT target_id FROM edges WHERE source_id = ?
+                        """, (node_id, node_id))
+                        
+                        potential_commit_ids = [r[0] for r in cursor.fetchall()]
+                        for potential_cid in potential_commit_ids:
+                            # Verify it's actually a commit (or at least linked to one)
+                            # Actually, we'll just check if it exists as a COMMIT node
+                            cursor.execute("SELECT type FROM nodes WHERE id = ?", (potential_cid,))
+                            row = cursor.fetchone()
+                            if row and row[0] == NodeType.COMMIT.value:
+                                cid = potential_cid
+                                if allowed_commits is not None and cid not in allowed_commits:
+                                    continue
+                                self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
+                                if cid in commits:
+                                    commits[cid]["relevance"] += 5
+                                    reason = f"Keyword '{kw}' matches {n_type} '{node_id}'"
+                                    if reason not in commits[cid]["reasons"]:
+                                        commits[cid]["reasons"].append(reason)
+                                    # Ensure trigger node is in connections
+                                    commits[cid]["connections"][node_id] = {
+                                        "type": n_type,
+                                        "distance": 0, # Trigger node
+                                        "attributes": json.loads(n_attr_json) if n_attr_json else {}
+                                    }
+
 
             # 4. Semantic Search via Vector DB
             if Path(self.vector_db_path).exists():
@@ -181,6 +231,8 @@ class SearchEngine:
                                 
                             linked_commits = [r[0] for r in cursor.fetchall()]
                             for cid in linked_commits:
+                                if allowed_commits is not None and cid not in allowed_commits:
+                                    continue
                                 self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
                                 if cid in commits:
                                     # Base relevance score boost from similarity
