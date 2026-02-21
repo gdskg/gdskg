@@ -96,7 +96,7 @@ def query_knowledge_graph(
     query: str,
     graph_path: str = str(DEFAULT_GRAPH_PATH),
     limit: int = 10,
-    depth: int = 1,
+    depth: int = 2,
     traverse_types: Optional[List[str]] = None,
     repo_name: Optional[str] = None,
     semantic_only: bool = False,
@@ -113,7 +113,7 @@ def query_knowledge_graph(
         query: The search query string.
         graph_path: Path to the knowledge graph SQLite database directory. Defaults to './gdskg_graph'.
         limit: Maximum number of results to return.
-        depth: Traversal depth for finding related nodes (0=direct matches only, 1=immediate neighbors, 2+=deeper). Default 1.
+        depth: Traversal depth for finding related nodes (0=direct matches only, 1=immediate neighbors, 2+=deeper). Default 2.
         traverse_types: Optional list of node types to traverse through (e.g., ['File', 'Symbol']). Restricts which relationship types are followed during depth search.
         repo_name: Optional repository name to scope the search to.
         semantic_only: If True, uses semantic search exclusively and ignores keywords.
