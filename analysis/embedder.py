@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Dict
 import numpy as np
 
 class ONNXEmbedder:
@@ -36,7 +36,6 @@ class ONNXEmbedder:
         hf_hub_download(repo_id=self.MODEL_ID, filename="tokenizer.json", local_dir=str(self.model_dir))
         hf_hub_download(repo_id=self.MODEL_ID, filename="onnx/model_quantized.onnx", local_dir=str(self.model_dir))
         
-        # Rename the downloaded model
         quantized_path = self.model_dir / "onnx" / "model_quantized.onnx"
         import shutil
         shutil.copy(quantized_path, self.onnx_path)
@@ -54,57 +53,87 @@ class ONNXEmbedder:
         import onnxruntime as ort
         
         self.tokenizer = Tokenizer.from_file(str(self.tokenizer_path))
-        # Ensure correct truncation
-        self.tokenizer.enable_truncation(max_length=256)
         self.tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
         
-        # Silence ORT warnings optionally
         options = ort.SessionOptions()
         options.log_severity_level = 3
         
         self.session = ort.InferenceSession(str(self.onnx_path), options)
         
-    def embed(self, texts: List[str]) -> np.ndarray:
+    def _chunk_tokens(self, ids: List[int], attention_mask: List[int], type_ids: List[int], max_length: int = 256, overlap: int = 50) -> List[Dict[str, List[int]]]:
+        """Splits token lists into overlapping chunks."""
+        chunks = []
+        length = len(ids)
+        
+        if length <= max_length:
+            return [{"ids": ids, "attention_mask": attention_mask, "type_ids": type_ids}]
+            
+        start = 0
+        while start < length:
+            end = min(start + max_length, length)
+            
+            chunk_ids = ids[start:end]
+            chunk_mask = attention_mask[start:end]
+            chunk_type = type_ids[start:end]
+            
+            if len(chunk_ids) < max_length:
+                pad_len = max_length - len(chunk_ids)
+                chunk_ids.extend([0] * pad_len)
+                chunk_mask.extend([0] * pad_len)
+                chunk_type.extend([0] * pad_len)
+                
+            chunks.append({
+                "ids": chunk_ids,
+                "attention_mask": chunk_mask,
+                "type_ids": chunk_type
+            })
+            
+            start += (max_length - overlap)
+            
+        return chunks
+        
+    def embed(self, texts: List[str]) -> List[np.ndarray]:
         """
         Embed a list of strings and mean-pool the results.
-        Returns a numpy array of shape (len(texts), 384).
+        Returns a list of numpy arrays, where each element corresponds to the 
+        embeddings for the chunks of that text. Shape of each array: (num_chunks, 384).
         """
         if not texts:
-            return np.array([])
+            return []
             
         self._load()
         
+        self.tokenizer.no_padding()
         encoded = self.tokenizer.encode_batch(texts)
+        self.tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
         
-        input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
-        attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
-        token_type_ids = np.array([e.type_ids for e in encoded], dtype=np.int64)
+        all_text_embeddings = []
         
-        # Get ONNX model inputs
-        ort_inputs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "token_type_ids": token_type_ids
-        }
-        
-        # Run inference
-        ort_outs = self.session.run(None, ort_inputs)
-        
-        # The first output is the last_hidden_state (batch_size, seq_len, hidden_size)
-        last_hidden_state = ort_outs[0]
-        
-        # Mean Pooling
-        # Expand attention mask to match hidden state shape
-        input_mask_expanded = np.broadcast_to(np.expand_dims(attention_mask, -1), last_hidden_state.shape)
-        
-        # Zero out padding tokens
-        sum_embeddings = np.sum(last_hidden_state * input_mask_expanded, axis=1)
-        sum_mask = np.clip(np.sum(input_mask_expanded, axis=1), a_min=1e-9, a_max=None)
-        
-        pooled_embeddings = sum_embeddings / sum_mask
-        
-        # L2 normalize
-        norms = np.linalg.norm(pooled_embeddings, axis=1, keepdims=True)
-        normalized_embeddings = pooled_embeddings / np.clip(norms, a_min=1e-9, a_max=None)
-        
-        return normalized_embeddings
+        for e in encoded:
+            chunks = self._chunk_tokens(e.ids, e.attention_mask, e.type_ids)
+            
+            input_ids = np.array([c["ids"] for c in chunks], dtype=np.int64)
+            attention_mask = np.array([c["attention_mask"] for c in chunks], dtype=np.int64)
+            token_type_ids = np.array([c["type_ids"] for c in chunks], dtype=np.int64)
+            
+            ort_inputs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids
+            }
+            
+            ort_outs = self.session.run(None, ort_inputs)
+            last_hidden_state = ort_outs[0]
+            
+            input_mask_expanded = np.broadcast_to(np.expand_dims(attention_mask, -1), last_hidden_state.shape)
+            sum_embeddings = np.sum(last_hidden_state * input_mask_expanded, axis=1)
+            sum_mask = np.clip(np.sum(input_mask_expanded, axis=1), a_min=1e-9, a_max=None)
+            
+            pooled_embeddings = sum_embeddings / sum_mask
+            
+            norms = np.linalg.norm(pooled_embeddings, axis=1, keepdims=True)
+            normalized_embeddings = pooled_embeddings / np.clip(norms, a_min=1e-9, a_max=None)
+            
+            all_text_embeddings.append(normalized_embeddings)
+            
+        return all_text_embeddings

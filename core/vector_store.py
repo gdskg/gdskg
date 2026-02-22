@@ -28,45 +28,52 @@ class VectorStore:
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS embeddings (
-                    node_id TEXT PRIMARY KEY,
+                    node_id TEXT NOT NULL,
+                    chunk_id INTEGER NOT NULL,
                     node_type TEXT NOT NULL,
-                    embedding BLOB NOT NULL
+                    embedding BLOB NOT NULL,
+                    PRIMARY KEY (node_id, chunk_id)
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_emb_type ON embeddings(node_type)")
             conn.commit()
             
-    def upsert_embedding(self, node_id: str, node_type: str, embedding: np.ndarray) -> None:
-        """Store or update the embedding for a node."""
-        emb_blob = embedding.astype(np.float32).tobytes()
+    def upsert_embedding(self, node_id: str, node_type: str, embeddings: List[np.ndarray]) -> None:
+        """Store or update the embeddings (chunks) for a node."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO embeddings (node_id, node_type, embedding)
-                VALUES (?, ?, ?)
-                ON CONFLICT(node_id) DO UPDATE SET
-                    node_type = excluded.node_type,
-                    embedding = excluded.embedding
-            """, (node_id, node_type, emb_blob))
+            cursor.execute("DELETE FROM embeddings WHERE node_id = ?", (node_id,))
+            
+            for chunk_id, emb in enumerate(embeddings):
+                emb_blob = emb.astype(np.float32).tobytes()
+                cursor.execute("""
+                    INSERT INTO embeddings (node_id, chunk_id, node_type, embedding)
+                    VALUES (?, ?, ?, ?)
+                """, (node_id, chunk_id, node_type, emb_blob))
             conn.commit()
 
-    def upsert_embeddings(self, items: List[Tuple[str, str, np.ndarray]]) -> None:
-        """Batch store embeddings."""
+    def upsert_embeddings(self, items: List[Tuple[str, str, List[np.ndarray]]]) -> None:
+        """Batch store embeddings (chunks) for multiple nodes."""
         if not items:
             return
             
-        data = []
-        for node_id, node_type, emb in items:
-            data.append((node_id, node_type, emb.astype(np.float32).tobytes()))
-            
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            
+            node_ids = list({item[0] for item in items})
+            for i in range(0, len(node_ids), 900):
+                batch_ids = node_ids[i:i+900]
+                placeholders = ",".join(["?"] * len(batch_ids))
+                cursor.execute(f"DELETE FROM embeddings WHERE node_id IN ({placeholders})", tuple(batch_ids))
+            
+            data = []
+            for node_id, node_type, embeddings in items:
+                for chunk_id, emb in enumerate(embeddings):
+                    data.append((node_id, chunk_id, node_type, emb.astype(np.float32).tobytes()))
+            
             cursor.executemany("""
-                INSERT INTO embeddings (node_id, node_type, embedding)
-                VALUES (?, ?, ?)
-                ON CONFLICT(node_id) DO UPDATE SET
-                    node_type = excluded.node_type,
-                    embedding = excluded.embedding
+                INSERT INTO embeddings (node_id, chunk_id, node_type, embedding)
+                VALUES (?, ?, ?, ?)
             """, data)
             conn.commit()
 
@@ -76,11 +83,13 @@ class VectorStore:
         Returns top_k results.
         """
         query_emb = query_embedding.astype(np.float32)
+        if query_emb.ndim > 1:
+            query_emb = np.mean(query_emb, axis=0)
         norm_q = np.linalg.norm(query_emb)
         if norm_q == 0:
             return []
             
-        results = []
+        results = {}
         
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -100,12 +109,15 @@ class VectorStore:
                     continue
                     
                 # Cosine similarity
-                sim = np.dot(query_emb, emb) / (norm_q * norm_emb)
-                results.append((node_id, node_type, float(sim)))
+                sim = float(np.dot(query_emb, emb) / (norm_q * norm_emb))
+                
+                if node_id not in results or sim > results[node_id][1]:
+                    results[node_id] = (node_type, sim)
                 
         # Sort by similarity descending
-        results.sort(key=lambda x: x[2], reverse=True)
-        return results[:top_k]
+        sorted_results = [(nid, ntype, sim) for nid, (ntype, sim) in results.items()]
+        sorted_results.sort(key=lambda x: x[2], reverse=True)
+        return sorted_results[:top_k]
 
     def build_from_graph(self, graph_path: str, embedder, progress_callback=None) -> int:
         """
@@ -116,7 +128,6 @@ class VectorStore:
         
         nodes_to_embed = []
         
-        # We need to find the latest version of functions, and all symbols.
         with sqlite3.connect(graph_path) as conn:
             cursor = conn.cursor()
             
@@ -132,21 +143,10 @@ class VectorStore:
                     pass
             
             # Get latest version of functions
-            # A function node has a HAS_HISTORY edge to a FUNCTION_HISTORY node.
-            # Then the history has HAS_VERSION edges to FUNCTION_VERSION nodes.
-            # The latest version is the target of a HAS_VERSION edge that is NOT the source of a PREVIOUS_VERSION edge, or simply by looking at the content.
-            # For simplicity, we can fetch all FUNCTION_VERSION nodes, group by history, and select latest if order is maintained,
-            # or simply fetch all functions, and their history, and traverse to the latest.
-            
             cursor.execute("SELECT id FROM nodes WHERE type = ?", (NodeType.FUNCTION.value,))
             function_ids = [r[0] for r in cursor.fetchall()]
             
             for f_id in function_ids:
-                # Get the latest version content for this function
-                # Note: this is a heuristic approach to find the latest version text quickly
-                # The server.py history logic does a more complex graph traversal.
-                
-                # Fetch all versions for this function's histories
                 cursor.execute("""
                     SELECT v.id, v.attributes
                     FROM edges h_edge
@@ -161,8 +161,6 @@ class VectorStore:
                 if not versions:
                     continue
                     
-                # Let's find the latest (the one not pointing to next)
-                # Or simply the one with no source_id in PREVIOUS_VERSION
                 v_ids = [v[0] for v in versions]
                 v_map = {v[0]: v[1] for v in versions}
                 
@@ -193,15 +191,18 @@ class VectorStore:
             batch = nodes_to_embed[i:i+batch_size]
             texts = [item[2] for item in batch]
             
-            # Embed texts
-            embeddings = embedder.embed(texts)
+            embeddings_list = embedder.embed(texts)
             
             store_items = []
-            for j, emb in enumerate(embeddings):
-                store_items.append((batch[j][0], batch[j][1], emb))
+            for j, embeddings in enumerate(embeddings_list):
+                if len(embeddings) > 0:
+                    store_items.append((batch[j][0], batch[j][1], embeddings))
                 
             self.upsert_embeddings(store_items)
-            embed_count += len(store_items)
+            
+            chunks_embedded = sum(len(embs) for _, _, embs in store_items)
+            embed_count += chunks_embedded
+            
             if progress_callback:
                 progress_callback(len(store_items))
             
