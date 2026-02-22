@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 import os
 
-from core.schema import NodeType
+from core.schema import NodeType, EdgeType
 
 class VectorStore:
     """
@@ -179,6 +179,38 @@ class VectorStore:
                             nodes_to_embed.append((f_id, NodeType.FUNCTION.value, content))
                     except Exception:
                         pass
+                        
+            # Get Commit Messages and all symbols per commit
+            cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.COMMIT.value,))
+            for c_id, attr_json in cursor.fetchall():
+                try:
+                    attrs = json.loads(attr_json)
+                    message = attrs.get('message', '')
+                    if message:
+                        nodes_to_embed.append((c_id, NodeType.COMMIT_MESSAGE.value, message))
+                except Exception:
+                    pass
+                
+                # Fetch symbols for this commit
+                cursor.execute("""
+                    SELECT n.attributes FROM edges e
+                    JOIN nodes n ON e.target_id = n.id
+                    WHERE e.source_id = ? AND e.type = ? AND n.type = ?
+                """, (c_id, EdgeType.MODIFIED_SYMBOL.value, NodeType.SYMBOL.value))
+                
+                commit_symbols = []
+                for (s_attr_json,) in cursor.fetchall():
+                    try:
+                        s_attrs = json.loads(s_attr_json)
+                        name = s_attrs.get('name', '')
+                        if name:
+                            commit_symbols.append(name)
+                    except Exception:
+                        pass
+                
+                if commit_symbols:
+                    all_symbols_text = " ".join(commit_symbols)
+                    nodes_to_embed.append((c_id, "COMMIT_SYMBOLS", all_symbols_text))
 
         # Batch embed and store
         embed_count = 0

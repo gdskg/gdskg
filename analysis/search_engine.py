@@ -55,12 +55,11 @@ class SearchEngine:
         stop_words = extractor.stop_words
         raw_keywords = query.lower().split()
         keywords = [kw for kw in raw_keywords if kw not in stop_words]
-        if not keywords: # Fallback to all if everything is a stop word
+        if not keywords:
             keywords = raw_keywords
 
         commits = {}
         
-        # Determine allowed types early
         allowed_types = set()
         if traverse_types:
             allowed_types = {t.upper() for t in traverse_types}
@@ -137,7 +136,6 @@ class SearchEngine:
                 
                 matched_nodes = cursor.fetchall()
                 for node_id, n_type, n_attr_json in matched_nodes:
-                    # If it's a COMMIT, score it directly
                     if n_type == NodeType.COMMIT.value:
                         if allowed_commits is not None and node_id not in allowed_commits:
                             continue
@@ -149,7 +147,6 @@ class SearchEngine:
                             if kw_count == 0:
                                 commits[node_id]["reasons"].append(f"Keyword '{kw}' found in commit metadata")
                     
-                    # If it's a KEYWORD node, find linked commits
                     elif n_type == NodeType.KEYWORD.value:
                         cursor.execute("""
                             SELECT source_id FROM edges 
@@ -175,8 +172,6 @@ class SearchEngine:
                     
                     # For other types, find linked commits via various edge types
                     else:
-                        # Find commits that are "related" to this node within 1 step
-                        # This covers: MODIFIED_FILE, MODIFIED_SYMBOL, MODIFIED_FUNCTION, HAS_MESSAGE, AUTHORED_BY, etc.
                         cursor.execute("""
                             SELECT source_id FROM edges WHERE target_id = ?
                             UNION
@@ -185,8 +180,6 @@ class SearchEngine:
                         
                         potential_commit_ids = [r[0] for r in cursor.fetchall()]
                         for potential_cid in potential_commit_ids:
-                            # Verify it's actually a commit (or at least linked to one)
-                            # Actually, we'll just check if it exists as a COMMIT node
                             cursor.execute("SELECT type FROM nodes WHERE id = ?", (potential_cid,))
                             row = cursor.fetchone()
                             if row and row[0] == NodeType.COMMIT.value:
@@ -209,10 +202,8 @@ class SearchEngine:
                                     }
 
 
-            # Pre-compute semantic relevance set for connection filtering
             semantic_relevance_set = set()
 
-            # 4. Semantic Search via Vector DB
             if Path(self.vector_db_path).exists():
                 try:
                     from core.vector_store import VectorStore
@@ -248,10 +239,14 @@ class SearchEngine:
                                     WHERE target_id = ? AND type = ?
                                 """, (node_id, EdgeType.MODIFIED_FUNCTION.value))
                                 reason = f"Similar meaning identified (matched {node_type} '{node_id}' score={similarity:.2f})"
+                            elif node_type == NodeType.COMMIT.value or node_type == NodeType.COMMIT_MESSAGE.value or node_type == "COMMIT_SYMBOLS":
+                                linked_commits = [node_id] # node_id is the commit id here
+                                reason = f"Similar meaning identified in commit context (matched {node_type} score={similarity:.2f})"
                             else:
                                 continue
                                 
-                            linked_commits = [r[0] for r in cursor.fetchall()]
+                            if node_type in [NodeType.SYMBOL.value, NodeType.FUNCTION.value]:
+                                linked_commits = [r[0] for r in cursor.fetchall()]
                             for cid in linked_commits:
                                 if allowed_commits is not None and cid not in allowed_commits:
                                     continue
