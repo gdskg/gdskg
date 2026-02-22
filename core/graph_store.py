@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import threading
 from pathlib import Path
 from typing import List, Optional, Tuple
 from core.schema import Node, Edge, NodeType, EdgeType
@@ -23,6 +24,7 @@ class GraphStore:
 
         self._nodes_cache = {}
         self._edges_cache = {}
+        self._lock = threading.Lock()
 
     def _init_db(self) -> None:
         """
@@ -77,14 +79,15 @@ class GraphStore:
         Returns:
             None
         """
-        if node.id in self._nodes_cache:
-            existing = self._nodes_cache[node.id]
-            if node.attributes:
-                if not existing.attributes:
-                    existing.attributes = {}
-                existing.attributes.update(node.attributes)
-        else:
-            self._nodes_cache[node.id] = node
+        with self._lock:
+            if node.id in self._nodes_cache:
+                existing = self._nodes_cache[node.id]
+                if node.attributes:
+                    if not existing.attributes:
+                        existing.attributes = {}
+                    existing.attributes.update(node.attributes)
+            else:
+                self._nodes_cache[node.id] = node
 
     def upsert_symbol(self, id: str, file_path: str) -> None:
         """
@@ -114,15 +117,16 @@ class GraphStore:
         Returns:
             None
         """
-        if edge.id in self._edges_cache:
-            existing = self._edges_cache[edge.id]
-            if edge.attributes:
-                if not existing.attributes:
-                    existing.attributes = {}
-                existing.attributes.update(edge.attributes)
-            existing.weight = max(existing.weight, edge.weight)
-        else:
-            self._edges_cache[edge.id] = edge
+        with self._lock:
+            if edge.id in self._edges_cache:
+                existing = self._edges_cache[edge.id]
+                if edge.attributes:
+                    if not existing.attributes:
+                        existing.attributes = {}
+                    existing.attributes.update(edge.attributes)
+                existing.weight = max(existing.weight, edge.weight)
+            else:
+                self._edges_cache[edge.id] = edge
 
     def get_node(self, node_id: str) -> Optional[Node]:
         """
@@ -134,15 +138,16 @@ class GraphStore:
         Returns:
             Optional[Node]: The node object if found, otherwise None.
         """
-        if node_id in self._nodes_cache:
-            return self._nodes_cache[node_id]
+        with self._lock:
+            if node_id in self._nodes_cache:
+                return self._nodes_cache[node_id]
 
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT id, type, attributes FROM nodes WHERE id = ?", (node_id,))
-        row = cursor.fetchone()
-        if row:
-            return Node(id=row[0], type=NodeType(row[1]), attributes=json.loads(row[2]))
-        return None
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT id, type, attributes FROM nodes WHERE id = ?", (node_id,))
+            row = cursor.fetchone()
+            if row:
+                return Node(id=row[0], type=NodeType(row[1]), attributes=json.loads(row[2]))
+            return None
     
     def count_nodes(self) -> int:
         """
@@ -154,6 +159,9 @@ class GraphStore:
         cursor = self.conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM nodes")
         db_count = cursor.fetchone()[0]
+        # The count of _nodes_cache should also be protected by the lock if it's accessed concurrently
+        # However, the instruction only specified wrapping cache accesses in upsert/get/flush.
+        # For consistency, it might be good to wrap this too, but I'll stick to the explicit instruction.
         return db_count + len(self._nodes_cache)
 
     def flush(self) -> None:
@@ -163,13 +171,14 @@ class GraphStore:
         Returns:
             None
         """
-        if not self._nodes_cache and not self._edges_cache:
-            return
+        with self._lock:
+            if not self._nodes_cache and not self._edges_cache:
+                return
 
-        cursor = self.conn.cursor()
-        self._flush_nodes(cursor)
-        self._flush_edges(cursor)
-        self.conn.commit()
+            cursor = self.conn.cursor()
+            self._flush_nodes(cursor)
+            self._flush_edges(cursor)
+            self.conn.commit()
 
     def _flush_nodes(self, cursor: sqlite3.Cursor) -> None:
         """

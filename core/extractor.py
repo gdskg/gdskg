@@ -1,6 +1,7 @@
 import os
 import sys
 import re
+import time
 import hashlib
 import difflib
 import uuid
@@ -65,6 +66,7 @@ class GraphExtractor:
         self.tree_cache = {}
         self.symbol_cache = {}
         self.diff_cache = collections.defaultdict(list)
+        self._state_lock = threading.Lock()
 
     def process_repo(self) -> None:
         """
@@ -80,12 +82,26 @@ class GraphExtractor:
         """
         repo_node = self._upsert_repo_node()
         
+        t1 = time.time()
         commit_order, commit_meta = self._phase1_parse_git_log()
+        d1 = time.time() - t1
+        
+        t2 = time.time()
         self._phase2_precache_blobs(commit_order)
+        d2 = time.time() - t2
+        
+        t3 = time.time()
         self._phase3_build_graph(commit_order, commit_meta, repo_node)
+        d3 = time.time() - t3
         
         self._process_keywords()
         self.store.finalize()
+        
+        if self.progress:
+            self.progress.console.print(f"[bold green]Extractor Timing Summary:[/bold green]")
+            self.progress.console.print(f"  Phase 1 (Parsing): {d1:.2f}s")
+            self.progress.console.print(f"  Phase 2 (Caching): {d2:.2f}s")
+            self.progress.console.print(f"  Phase 3 (Building): {d3:.2f}s")
 
     def _upsert_repo_node(self) -> Node:
         """
@@ -115,6 +131,16 @@ class GraphExtractor:
         """
         commit_order = []
         commit_meta = {}
+
+        total_commits = 0
+        try:
+            total_commits = int(subprocess.check_output(['git', '-C', str(self.repo_path), 'rev-list', '--count', 'HEAD']).strip())
+        except Exception:
+            total_commits = None
+
+        parse_task = None
+        if self.progress:
+            parse_task = self.progress.add_task("[yellow]Phase 1: Parsing git log...[/yellow]", total=total_commits)
         
         log_process = subprocess.Popen(
             ['git', '-C', str(self.repo_path), 'log', '--no-abbrev', '--raw', '-p', '-U0',
@@ -124,7 +150,7 @@ class GraphExtractor:
         )
         
         ctx = {'current_commit': None, 'current_diff': None, 'in_message': False, 
-               'message_buffer': [], 'skip_current': False, 'current_diffs': None}
+               'message_buffer': [], 'skip_current': False, 'current_diffs': None, 'parse_task': parse_task}
 
         for line in log_process.stdout:
             if line.startswith('^C^'):
@@ -163,6 +189,15 @@ class GraphExtractor:
         parts = line[3:].split('|~|', 8)
         if len(parts) >= 9:
             hexsha, author_name = parts[0], parts[3]
+            
+            if self.progress and ctx.get('parse_task') is not None:
+                self.progress.advance(ctx['parse_task'])
+            
+            if self.store.get_node(hexsha) is not None:
+                ctx['skip_current'] = True
+                ctx['in_message'] = '^E^' not in parts[8]
+                ctx['current_commit'] = ctx['current_diff'] = ctx['current_diffs'] = None
+                return
             
             is_bot = any(x in author_name.lower() for x in ["[bot]", "dependabot", "greenkeeper"])
             if self.skip_bots and is_bot:
@@ -274,7 +309,7 @@ class GraphExtractor:
             except Exception: pass
 
         if self.progress:
-            t = self.progress.add_task("[cyan]Pre-caching file data...", total=len(blob_tasks))
+            t = self.progress.add_task("[cyan]Phase 2: Pre-caching file data...[/cyan]", total=len(blob_tasks))
         
         with ThreadPoolExecutor(max_workers=16) as exc:
             futures = [exc.submit(preprocess, s, e) for s, e in blob_tasks]
@@ -292,26 +327,89 @@ class GraphExtractor:
             repo_node (Node): The root repository node.
         """
         if self.progress:
-            t = self.progress.add_task("[green]Building graph...", total=len(commit_order))
-            for hexsha in commit_order:
-                self._process_commit_fast(commit_meta[hexsha], repo_node)
-                self.progress.advance(t)
+            t = self.progress.add_task("[green]Phase 3: Building graph...[/green]", total=len(commit_order))
+            with ThreadPoolExecutor(max_workers=8) as exc:
+                # Parallel Analysis
+                analysis_results = exc.map(lambda h: self._analyze_commit(commit_meta[h]), commit_order)
+                # Ordered Stitching
+                for result in analysis_results:
+                    self._apply_commit_analysis(result, repo_node)
+                    self.progress.advance(t)
         else:
             from rich.console import Console
             with Progress(console=Console(file=sys.stderr)) as p:
-                t = p.add_task("[green]Building graph...", total=len(commit_order))
-                for hexsha in commit_order:
-                    self._process_commit_fast(commit_meta[hexsha], repo_node)
-                    p.advance(t)
+                t = p.add_task("[green]Phase 3: Building graph...[/green]", total=len(commit_order))
+                with ThreadPoolExecutor(max_workers=8) as exc:
+                    analysis_results = exc.map(lambda h: self._analyze_commit(commit_meta[h]), commit_order)
+                    for result in analysis_results:
+                        self._apply_commit_analysis(result, repo_node)
+                        p.advance(t)
 
-    def _process_commit_fast(self, meta: dict, repo_node: Node) -> None:
+    def _analyze_commit(self, meta: dict) -> dict:
         """
-        Process a single commit, creating its node and processing its diffs.
+        Perform thread-safe analysis of a commit and its diffs.
+        Returns a result dictionary to be stitched sequentially.
+        """
+        analysis = {
+            'meta': meta,
+            'commit_keywords': self.keyword_extractor.extract_keywords(meta['message']),
+            'diff_analyses': []
+        }
+        
+        for diff_data in self.diff_cache.get(meta['hexsha'], []):
+            file_path = diff_data.get('b_path') or diff_data.get('a_path')
+            if not file_path: continue
+            
+            diff_res = {
+                'diff_data': diff_data,
+                'file_path': file_path,
+                'file_name': Path(file_path).name,
+                'extension': Path(file_path).suffix,
+                'path_keywords': self.keyword_extractor.extract_keywords(Path(file_path).name, is_code=True),
+                'language_analysis': None,
+                'secrets': []
+            }
+            
+            if diff_data['change_type'][0] != 'D':
+                sha = diff_data.get('b_blob_hexsha')
+                content = self.blob_cache.get(sha)
+                if content:
+                    # Secret Scanning
+                    diff_res['secrets'] = self.secret_scanner.scan(content)
+                    
+                    # Language Analysis
+                    lang = TreeSitterUtils.map_extension_to_language(diff_res['extension'])
+                    if lang:
+                        tree = self.tree_cache.get(sha)
+                        defs, table = self.symbol_cache.get(sha, ({}, {}))
+                        patch = diff_data['diff_lines']
+                        affected, added_text = self._parse_patch(patch)
+                        
+                        lang_analysis = {
+                            'defs': defs,
+                            'added_text_keywords': self.keyword_extractor.extract_keywords(added_text, is_code=True),
+                            'mod_syms': [],
+                            'mod_funcs': {},
+                            'comments': []
+                        }
+                        
+                        if affected:
+                            mod_syms, mod_funcs, comments = self.symbol_extractor.analyze_diff(content, lang, affected, table, tree=tree)
+                            lang_analysis['mod_syms'] = mod_syms
+                            lang_analysis['mod_funcs'] = mod_funcs
+                            lang_analysis['comments'] = comments
+                        
+                        diff_res['language_analysis'] = lang_analysis
+            
+            analysis['diff_analyses'].append(diff_res)
+            
+        return analysis
 
-        Args:
-            meta (dict): Metadata for the commit.
-            repo_node (Node): The repository node the commit belongs to.
+    def _apply_commit_analysis(self, analysis: dict, repo_node: Node) -> None:
         """
+        Sequentially apply analysis results to the graph (Ordered Stitching).
+        """
+        meta = analysis['meta']
         commit_node = Node(
             id=meta['hexsha'], type=NodeType.COMMIT,
             attributes={
@@ -324,10 +422,74 @@ class GraphExtractor:
         self.store.upsert_node(commit_node)
         self._link_commit_basics(commit_node, repo_node, meta)
         
-        for diff_data in self.diff_cache.get(meta['hexsha'], []):
-            self._process_diff_item(diff_data, commit_node)
+        # Keywords
+        for kw in analysis['commit_keywords']:
+            self.term_counts[kw] += 1
+            self.term_to_nodes[kw].add(commit_node.id)
+            
+        # Diff Items
+        for diff_res in analysis['diff_analyses']:
+            self._apply_diff_analysis(diff_res, commit_node)
 
+        # Plugins (Stateless or stateful, must run here for consistency)
         self._run_plugins(commit_node, repo_node, meta)
+
+    def _apply_diff_analysis(self, diff_res: dict, commit_node: Node) -> None:
+        """Apply analysis of a single file diff."""
+        file_path = diff_res['file_path']
+        diff_data = diff_res['diff_data']
+        
+        file_node = Node(id=file_path, type=NodeType.FILE, attributes={"name": diff_res['file_name'], "extension": diff_res['extension']})
+        self.store.upsert_node(file_node)
+        
+        for fkw in diff_res['path_keywords']:
+            self.term_counts[fkw] += 1
+            self.term_to_nodes[fkw].add(file_node.id)
+
+        attrs = {"change_type": diff_data['change_type']}
+        if diff_data.get('a_path') and diff_data.get('a_path') != file_path:
+            attrs["source_path"] = diff_data['a_path']
+
+        self.store.upsert_edge(Edge(commit_node.id, file_node.id, EdgeType.MODIFIED_FILE, attributes=attrs))
+
+        if diff_data['change_type'][0] == 'D': return
+        
+        # Secrets
+        for secret in diff_res['secrets']:
+            s_node = Node(id=f"ENV:{secret}", type=NodeType.SECRET, attributes={"variable": secret})
+            self.store.upsert_node(s_node)
+            self.store.upsert_edge(Edge(s_node.id, commit_node.id, EdgeType.REFERENCES_ENV))
+            
+        # Language Analysis
+        la = diff_res['language_analysis']
+        if la:
+            # Defs
+            for name, canonical in la['defs'].items():
+                sym = Node(id=canonical, type=NodeType.SYMBOL, attributes={"name": name, "file": file_node.id})
+                self.store.upsert_node(sym)
+                self.store.upsert_edge(Edge(file_node.id, sym.id, EdgeType.HAS_SYMBOL))
+                for skw in self.keyword_extractor.extract_keywords(name, is_code=True):
+                    self.term_counts[skw] += 1
+                    self.term_to_nodes[skw].add(sym.id)
+            
+            # Patch Keywords
+            for hkw in la['added_text_keywords']:
+                self.term_counts[hkw] += 1
+                self.term_to_nodes[hkw].add(commit_node.id)
+                
+            # Modified Symbols
+            for sym_name in la['mod_syms']:
+                self.store.upsert_symbol(sym_name, file_node.id)
+                self.store.upsert_edge(Edge(sym_name, commit_node.id, EdgeType.MODIFIED_SYMBOL))
+            
+            # Functions (CRITICAL ORDERING!)
+            for f_name, f_content in la['mod_funcs'].items():
+                self._process_function_version(f_name, f_content, file_node.id, commit_node)
+                
+            # Comments
+            for text, c_type, line in la['comments']:
+                self._process_comment(text, c_type, line, file_node, commit_node)
+
 
     def _link_commit_basics(self, commit_node, repo_node, meta):
         """
@@ -391,9 +553,8 @@ class GraphExtractor:
         self.store.upsert_node(time_node)
         self.store.upsert_edge(Edge(commit_node.id, time_node.id, EdgeType.OCCURRED_IN))
 
-        for kw in self.keyword_extractor.extract_keywords(meta['message']):
-            self.term_counts[kw] += 1
-            self.term_to_nodes[kw].add(commit_node.id)
+        # Note: Keywords are now handled in _apply_commit_analysis using pre-extracted keywords
+        pass
 
     def _run_plugins(self, commit_node, repo_node, meta):
         """
@@ -444,8 +605,9 @@ class GraphExtractor:
         self.store.upsert_node(file_node)
         
         for fkw in self.keyword_extractor.extract_keywords(file_node.attributes["name"], is_code=True):
-            self.term_counts[fkw] += 1
-            self.term_to_nodes[fkw].add(file_node.id)
+            with self._state_lock:
+                self.term_counts[fkw] += 1
+                self.term_to_nodes[fkw].add(file_node.id)
 
         attrs = {"change_type": diff_data['change_type']}
         if diff_data.get('a_path') and diff_data.get('a_path') != file_path:
@@ -501,14 +663,16 @@ class GraphExtractor:
             self.store.upsert_node(sym)
             self.store.upsert_edge(Edge(file_node.id, sym.id, EdgeType.HAS_SYMBOL))
             for skw in self.keyword_extractor.extract_keywords(name, is_code=True):
-                self.term_counts[skw] += 1
-                self.term_to_nodes[skw].add(sym.id)
+                with self._state_lock:
+                    self.term_counts[skw] += 1
+                    self.term_to_nodes[skw].add(sym.id)
         
         patch = diff_data['diff_lines']
         affected, added_text = self._parse_patch(patch)
         for hkw in self.keyword_extractor.extract_keywords(added_text, is_code=True):
-            self.term_counts[hkw] += 1
-            self.term_to_nodes[hkw].add(commit_node.id)
+            with self._state_lock:
+                self.term_counts[hkw] += 1
+                self.term_to_nodes[hkw].add(commit_node.id)
         
         if affected:
             mod_syms, mod_funcs, comments = self.symbol_extractor.analyze_diff(content, lang, affected, table, tree=tree)
@@ -563,6 +727,7 @@ class GraphExtractor:
         self.store.upsert_node(f_node)
         self.store.upsert_edge(Edge(commit_node.id, f_node.id, EdgeType.MODIFIED_FUNCTION))
         
+        # Sequentially update history - no lock needed if called in ordered stitch phase
         best, best_score = self._find_best_history_match(f_name, f_content, file_path)
                 
         if best and (best['last_file'] == file_path or best_score > 0.6):
@@ -577,12 +742,13 @@ class GraphExtractor:
             prev_v_id = None
             
         v_id = f"VERSION:{h_id}:{commit_node.id}:{hashlib.sha256(f_content.encode('utf-8')).hexdigest()[:8]}"
+        best['last_version_id'] = v_id
+
         self.store.upsert_node(Node(id=v_id, type=NodeType.FUNCTION_VERSION, attributes={"content": f_content, "commit_id": commit_node.id, "file_path": file_path}))
         self.store.upsert_edge(Edge(h_id, v_id, EdgeType.HAS_VERSION))
         self.store.upsert_edge(Edge(commit_node.id, v_id, EdgeType.CREATED_VERSION))
         if prev_v_id:
             self.store.upsert_edge(Edge(prev_v_id, v_id, EdgeType.PREVIOUS_VERSION))
-        best['last_version_id'] = v_id
 
     def _find_best_history_match(self, f_name: str, content: str, file_path: str) -> tuple:
         """

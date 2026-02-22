@@ -51,6 +51,12 @@ class KeywordExtractor:
         self.lemmatizer = WordNetLemmatizer()
         self.stop_words = set(stopwords.words('english'))
         
+        try:
+            self.lemmatizer.lemmatize('a')
+            nltk.pos_tag(['a'])
+        except Exception:
+            pass
+        
         # Add programming language reserved keywords and common noise
         self.stop_words.update({
             'use', 'using', 'used', 'add', 'added', 'adding', 'remove', 'removed', 'removing',

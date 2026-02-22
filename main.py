@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import collections
+import time
 import json
 import sqlite3
 import uvicorn
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 from git import Repo
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.text import Text
 from starlette.applications import Starlette
@@ -327,7 +328,7 @@ def _run_build_process(repo_path: Path, store: GraphStore, plugins: List[Any], p
     Returns:
         None
     """
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), TimeRemainingColumn(), console=console, transient=True) as progress:
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), "•", TimeElapsedColumn(), "•", TimeRemainingColumn(), console=console, transient=True) as progress:
         extractor = GraphExtractor(repo_path, store, plugins=plugins, plugin_config=plugin_config, progress=progress, skip_bots=not include_bots)
         try:
             extractor.process_repo()
@@ -341,17 +342,9 @@ def _run_build_process(repo_path: Path, store: GraphStore, plugins: List[Any], p
             store.close()
 
 def _run_semantic_indexing(db_path: Path, progress: Progress):
-    """
-    Generate and store semantic vector embeddings for the graph nodes.
-
-    Args:
-        db_path (Path): Path to the database file.
-        progress (Progress): Rich progress instance.
-
-    Returns:
-        None
-    """
-    task = progress.add_task("[cyan]Semantic indexing...", total=None)
+    """Generate and store semantic vector embeddings for the graph nodes."""
+    t0 = time.time()
+    task = progress.add_task("[cyan]Phase 4: Semantic indexing...[/cyan]", total=None)
     vstore = VectorStore()
     embedder = ONNXEmbedder()
     
@@ -362,7 +355,8 @@ def _run_semantic_indexing(db_path: Path, progress: Progress):
             progress.advance(task, count)
             
     count = vstore.build_from_graph(str(db_path), embedder, progress_callback=callback)
-    console.print(f"[bold green]✓[/bold green] Semantic indexing complete! [blue]{count}[/blue] embeddings generated.")
+    duration = time.time() - t0
+    console.print(f"[bold green]✓[/bold green] Phase 4 complete! [blue]{count}[/blue] embeddings generated in [blue]{duration:.2f}s[/blue].")
 
 def _parse_metadata_filters(filters: Optional[List[str]]) -> Dict[str, str]:
     """
