@@ -8,11 +8,16 @@ import os
 from core.schema import NodeType, EdgeType
 
 class VectorStore:
-    """
-    Persistent storage for node embeddings using SQLite and numpy for similarity matching.
-    """
+    """Persistent storage for node embeddings using SQLite and numpy."""
     
     def __init__(self, db_path: Optional[Path] = None):
+        """
+        Initialize the VectorStore with the specified SQLite database path.
+
+        Args:
+            db_path (Path, optional): Path to the SQLite database file. 
+                Defaults to ~/.gdskg/vector_db/gdskg_vectors.db.
+        """
         if db_path is None:
             vector_dir = Path(os.environ.get("GDSKG_VECTOR_DB_DIR", Path.home() / ".gdskg" / "vector_db"))
             vector_dir.mkdir(parents=True, exist_ok=True)
@@ -24,6 +29,12 @@ class VectorStore:
         self._init_db()
         
     def _init_db(self) -> None:
+        """
+        Initialize the SQLite database schema for embeddings.
+
+        Returns:
+            None
+        """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -39,7 +50,17 @@ class VectorStore:
             conn.commit()
             
     def upsert_embedding(self, node_id: str, node_type: str, embeddings: List[np.ndarray]) -> None:
-        """Store or update the embeddings (chunks) for a node."""
+        """
+        Store or update the embeddings (chunks) for a node.
+
+        Args:
+            node_id (str): The unique identifier of the node.
+            node_type (str): The type of the node.
+            embeddings (List[np.ndarray]): A list of vector embeddings for the node's content.
+
+        Returns:
+            None
+        """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM embeddings WHERE node_id = ?", (node_id,))
@@ -53,7 +74,15 @@ class VectorStore:
             conn.commit()
 
     def upsert_embeddings(self, items: List[Tuple[str, str, List[np.ndarray]]]) -> None:
-        """Batch store embeddings (chunks) for multiple nodes."""
+        """
+        Batch store embeddings (chunks) for multiple nodes.
+
+        Args:
+            items (List[Tuple[str, str, List[np.ndarray]]]): A list of (node_id, node_type, embeddings) tuples.
+
+        Returns:
+            None
+        """
         if not items:
             return
             
@@ -79,8 +108,15 @@ class VectorStore:
 
     def search(self, query_embedding: np.ndarray, top_k: int = 5, node_types: Optional[List[str]] = None) -> List[Tuple[str, str, float]]:
         """
-        Compute cosine similarity between the query embedding and all stored embeddings.
-        Returns top_k results.
+        Compute cosine similarity between the query embedding and stored embeddings.
+
+        Args:
+            query_embedding (np.ndarray): The vector embedding of the search query.
+            top_k (int, optional): The number of top results to return. Defaults to 5.
+            node_types (List[str], optional): Filter results to specific node types. Defaults to None.
+
+        Returns:
+            List[Tuple[str, str, float]]: A list of (node_id, node_type, similarity) tuples.
         """
         query_emb = query_embedding.astype(np.float32)
         if query_emb.ndim > 1:
@@ -108,111 +144,150 @@ class VectorStore:
                 if norm_emb == 0:
                     continue
                     
-                # Cosine similarity
                 sim = float(np.dot(query_emb, emb) / (norm_q * norm_emb))
                 
                 if node_id not in results or sim > results[node_id][1]:
                     results[node_id] = (node_type, sim)
                 
-        # Sort by similarity descending
         sorted_results = [(nid, ntype, sim) for nid, (ntype, sim) in results.items()]
         sorted_results.sort(key=lambda x: x[2], reverse=True)
         return sorted_results[:top_k]
 
     def build_from_graph(self, graph_path: str, embedder, progress_callback=None) -> int:
         """
-        Extract the latest version of FUNCTION nodes, and all SYMBOL nodes,
-        embed them, and store them.
+        Extract nodes from graph, embed them, and store them.
+
+        Args:
+            graph_path (str): Path to the GraphStore SQLite database.
+            embedder (ONNXEmbedder): The embedder instance to use.
+            progress_callback (callable, optional): Callback for progress updates.
+
+        Returns:
+            int: The total number of embedding chunks stored.
         """
-        import json
-        
         nodes_to_embed = []
         
         with sqlite3.connect(graph_path) as conn:
             cursor = conn.cursor()
-            
-            # Get Symbols
-            cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.SYMBOL.value,))
-            for node_id, attr_json in cursor.fetchall():
-                try:
-                    attrs = json.loads(attr_json)
-                    content = attrs.get('name', '')
-                    if content:
-                        nodes_to_embed.append((node_id, NodeType.SYMBOL.value, content))
-                except Exception:
-                    pass
-            
-            # Get latest version of functions
-            cursor.execute("SELECT id FROM nodes WHERE type = ?", (NodeType.FUNCTION.value,))
-            function_ids = [r[0] for r in cursor.fetchall()]
-            
-            for f_id in function_ids:
-                cursor.execute("""
-                    SELECT v.id, v.attributes
-                    FROM edges h_edge
-                    JOIN edges v_edge ON h_edge.target_id = v_edge.source_id
-                    JOIN nodes v ON v_edge.target_id = v.id
-                    WHERE h_edge.source_id = ? 
-                      AND h_edge.type = 'HAS_HISTORY' 
-                      AND v_edge.type = 'HAS_VERSION'
-                """, (f_id,))
-                
-                versions = cursor.fetchall()
-                if not versions:
-                    continue
-                    
-                v_ids = [v[0] for v in versions]
-                v_map = {v[0]: v[1] for v in versions}
-                
-                placeholders = ",".join("?" * len(v_ids))
-                cursor.execute(f"SELECT source_id FROM edges WHERE type='PREVIOUS_VERSION' AND source_id IN ({placeholders})", tuple(v_ids))
-                has_next = {r[0] for r in cursor.fetchall()}
-                
-                latest_v_ids = [vid for vid in v_ids if vid not in has_next]
-                
-                for latest_vid in latest_v_ids:
-                    attr_json = v_map[latest_vid]
-                    try:
-                        attrs = json.loads(attr_json)
-                        content = attrs.get('content', '')
-                        if content:
-                            nodes_to_embed.append((f_id, NodeType.FUNCTION.value, content))
-                    except Exception:
-                        pass
-                        
-            # Get Commit Messages and all symbols per commit
-            cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.COMMIT.value,))
-            for c_id, attr_json in cursor.fetchall():
-                try:
-                    attrs = json.loads(attr_json)
-                    message = attrs.get('message', '')
-                    if message:
-                        nodes_to_embed.append((c_id, NodeType.COMMIT_MESSAGE.value, message))
-                except Exception:
-                    pass
-                
-                # Fetch symbols for this commit
-                cursor.execute("""
-                    SELECT n.attributes FROM edges e
-                    JOIN nodes n ON e.target_id = n.id
-                    WHERE e.source_id = ? AND e.type = ? AND n.type = ?
-                """, (c_id, EdgeType.MODIFIED_SYMBOL.value, NodeType.SYMBOL.value))
-                
-                commit_symbols = []
-                for (s_attr_json,) in cursor.fetchall():
-                    try:
-                        s_attrs = json.loads(s_attr_json)
-                        name = s_attrs.get('name', '')
-                        if name:
-                            commit_symbols.append(name)
-                    except Exception:
-                        pass
-                
-                if commit_symbols:
-                    all_symbols_text = " ".join(commit_symbols)
-                    nodes_to_embed.append((c_id, "COMMIT_SYMBOLS", all_symbols_text))
+            self._extract_symbols(cursor, nodes_to_embed)
+            self._extract_latest_function_versions(cursor, nodes_to_embed)
+            self._extract_commits_and_symbols(cursor, nodes_to_embed)
 
-        # Batch embed and store
+        return self._batch_embed_and_store(nodes_to_embed, embedder, progress_callback)
+
+    def _extract_symbols(self, cursor: sqlite3.Cursor, nodes_to_embed: list) -> None:
+        """
+        Extract all symbol nodes from the graph for embedding.
+
+        Args:
+            cursor (sqlite3.Cursor): The graph database cursor.
+            nodes_to_embed (list): The list to append extraction results to.
+        """
+        cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.SYMBOL.value,))
+        for node_id, attr_json in cursor.fetchall():
+            try:
+                attrs = json.loads(attr_json)
+                content = attrs.get('name', '')
+                if content:
+                    nodes_to_embed.append((node_id, NodeType.SYMBOL.value, content))
+            except Exception:
+                pass
+
+    def _extract_latest_function_versions(self, cursor: sqlite3.Cursor, nodes_to_embed: list) -> None:
+        """
+        Identify and extract the most recent version of each function for semantic indexing.
+
+        Args:
+            cursor (sqlite3.Cursor): The graph database cursor.
+            nodes_to_embed (list): The list to append extraction results to.
+        """
+        cursor.execute("SELECT id FROM nodes WHERE type = ?", (NodeType.FUNCTION.value,))
+        function_ids = [r[0] for r in cursor.fetchall()]
+        
+        for f_id in function_ids:
+            cursor.execute("""
+                SELECT v.id, v.attributes
+                FROM edges h_edge
+                JOIN edges v_edge ON h_edge.target_id = v_edge.source_id
+                JOIN nodes v ON v_edge.target_id = v.id
+                WHERE h_edge.source_id = ? 
+                  AND h_edge.type = 'HAS_HISTORY' 
+                  AND v_edge.type = 'HAS_VERSION'
+            """, (f_id,))
+            
+            versions = cursor.fetchall()
+            if not versions:
+                continue
+                
+            v_ids = [v[0] for v in versions]
+            v_map = {v[0]: v[1] for v in versions}
+            
+            placeholders = ",".join("?" * len(v_ids))
+            cursor.execute(f"SELECT source_id FROM edges WHERE type='PREVIOUS_VERSION' AND source_id IN ({placeholders})", tuple(v_ids))
+            has_next = {r[0] for r in cursor.fetchall()}
+            
+            latest_v_ids = [vid for vid in v_ids if vid not in has_next]
+            
+            for latest_vid in latest_v_ids:
+                attr_json = v_map[latest_vid]
+                try:
+                    attrs = json.loads(attr_json)
+                    content = attrs.get('content', '')
+                    if content:
+                        nodes_to_embed.append((f_id, NodeType.FUNCTION.value, content))
+                except Exception:
+                    pass
+
+    def _extract_commits_and_symbols(self, cursor: sqlite3.Cursor, nodes_to_embed: list) -> None:
+        """
+        Extract commit messages and the names of modified symbols for semantic indexing.
+
+        Args:
+            cursor (sqlite3.Cursor): The graph database cursor.
+            nodes_to_embed (list): The list to append extraction results to.
+        """
+        cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.COMMIT.value,))
+        for c_id, attr_json in cursor.fetchall():
+            try:
+                attrs = json.loads(attr_json)
+                message = attrs.get('message', '')
+                if message:
+                    nodes_to_embed.append((c_id, NodeType.COMMIT_MESSAGE.value, message))
+            except Exception:
+                pass
+            
+            cursor.execute("""
+                SELECT n.attributes FROM edges e
+                JOIN nodes n ON e.target_id = n.id
+                WHERE e.source_id = ? AND e.type = ? AND n.type = ?
+            """, (c_id, EdgeType.MODIFIED_SYMBOL.value, NodeType.SYMBOL.value))
+            
+            commit_symbols = []
+            for (s_attr_json,) in cursor.fetchall():
+                try:
+                    s_attrs = json.loads(s_attr_json)
+                    name = s_attrs.get('name', '')
+                    if name:
+                        commit_symbols.append(name)
+                except Exception:
+                    pass
+            
+            if commit_symbols:
+                all_symbols_text = " ".join(commit_symbols)
+                nodes_to_embed.append((c_id, "COMMIT_SYMBOLS", all_symbols_text))
+
+    def _batch_embed_and_store(self, nodes_to_embed: list, embedder, progress_callback) -> int:
+        """
+        Process a list of nodes through the embedder and store the results in batches.
+
+        Args:
+            nodes_to_embed (list): List of (id, type, content) tuples.
+            embedder: The embedder instance.
+            progress_callback: Callback for progress updates.
+
+        Returns:
+            int: Total number of chunks embedded.
+        """
         embed_count = 0
         batch_size = 32
         
@@ -241,4 +316,11 @@ class VectorStore:
         return embed_count
 
     def close(self) -> None:
+        """
+        Close any open connections or resources (placeholder for future use).
+
+        Returns:
+            None
+        """
         pass
+

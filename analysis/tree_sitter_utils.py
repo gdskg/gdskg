@@ -15,6 +15,12 @@ class TreeSitterUtils:
     def get_parser(lang_name: str) -> Parser:
         """
         Retrieve a tree-sitter parser for the specified language.
+
+        Args:
+            lang_name (str): The name of the programming language.
+
+        Returns:
+            Parser: A tree-sitter Parser object configured for the language, or None if the language is not supported.
         """
         if lang_name not in TreeSitterUtils._languages:
             try:

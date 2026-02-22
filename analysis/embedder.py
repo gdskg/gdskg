@@ -13,6 +13,12 @@ class ONNXEmbedder:
     MODEL_ID = "Xenova/all-MiniLM-L6-v2"
     
     def __init__(self, model_dir: str = None):
+        """
+        Initialize the ONNXEmbedder with the specified model directory.
+        
+        Args:
+            model_dir (str, optional): The directory to store and load the model from.
+        """
         if model_dir is None:
             model_dir = str(Path.home() / ".gdskg" / "models")
             
@@ -24,7 +30,12 @@ class ONNXEmbedder:
         self.session = None
         
     def _download_if_needed(self):
-        """Downloads the ONNX model and tokenizer from HuggingFace."""
+        """
+        Download the ONNX model and tokenizer from HuggingFace if they are not already present.
+
+        Returns:
+            None
+        """
         if self.tokenizer_path.exists() and self.onnx_path.exists():
             return
             
@@ -43,7 +54,12 @@ class ONNXEmbedder:
         print("Download complete.", file=sys.stderr)
 
     def _load(self):
-        """Loads tokenizer and ONNX session into memory."""
+        """
+        Load the tokenizer and ONNX inference session into memory.
+
+        Returns:
+            None
+        """
         if self.tokenizer is not None and self.session is not None:
             return
             
@@ -61,7 +77,19 @@ class ONNXEmbedder:
         self.session = ort.InferenceSession(str(self.onnx_path), options)
         
     def _chunk_tokens(self, ids: List[int], attention_mask: List[int], type_ids: List[int], max_length: int = 256, overlap: int = 50) -> List[Dict[str, List[int]]]:
-        """Splits token lists into overlapping chunks."""
+        """
+        Split token lists into overlapping chunks to handle long text.
+
+        Args:
+            ids (List[int]): The token identifiers.
+            attention_mask (List[int]): The attention mask for the tokens.
+            type_ids (List[int]): The token type identifiers.
+            max_length (int): The maximum length of each chunk.
+            overlap (int): The number of tokens to overlap between chunks.
+
+        Returns:
+            List[Dict[str, List[int]]]: A list of dictionary objects, each containing token IDs, masks, and types for a chunk.
+        """
         chunks = []
         length = len(ids)
         
@@ -95,8 +123,13 @@ class ONNXEmbedder:
     def embed(self, texts: List[str]) -> List[np.ndarray]:
         """
         Embed a list of strings and mean-pool the results.
-        Returns a list of numpy arrays, where each element corresponds to the 
-        embeddings for the chunks of that text. Shape of each array: (num_chunks, 384).
+
+        Args:
+            texts (List[str]): A list of strings to generate embeddings for.
+
+        Returns:
+            List[np.ndarray]: A list of numpy arrays, one for each input text. 
+            Each array contains the normalized embeddings for the chunks of that text.
         """
         if not texts:
             return []

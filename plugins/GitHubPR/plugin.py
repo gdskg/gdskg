@@ -10,7 +10,17 @@ from core.schema import Node, Edge, NodeType
 logger = logging.getLogger(__name__)
 
 class GitHubPlugin(PluginInterface):
+    """
+    Plugin for enriching the graph with GitHub Pull Request metadata.
+    
+    Identifies PR references in commit messages and fetches detailed information
+    such as titles, descriptions, and authors from the GitHub API.
+    """
+    
     def __init__(self):
+        """
+        Initialize the GitHub plugin, retrieving the API token from environment variables.
+        """
         self.pat = os.environ.get("GITHUB_PAT") or os.environ.get("GITHUB_TOKEN")
         self.enabled = True
         if not self.pat:
@@ -23,6 +33,19 @@ class GitHubPlugin(PluginInterface):
         self.pr_cache = {}
 
     def process(self, commit_node: Node, related_nodes: List[Node], related_edges: List[Edge], graph_api: GraphInterface, config: Dict[str, Any] = None) -> None:
+        """
+        Identify PR references in commit messages and fetch metadata.
+
+        Args:
+            commit_node (Node): The node representing the current commit.
+            related_nodes (List[Node]): Nodes connected to the commit.
+            related_edges (List[Edge]): Edges connected to the commit.
+            graph_api (GraphInterface): The API for adding new nodes/edges.
+            config (Dict[str, Any], optional): Plugin configuration. Defaults to None.
+
+        Returns:
+            None
+        """
         if not self.enabled:
             return
             
@@ -65,6 +88,12 @@ class GitHubPlugin(PluginInterface):
     def _parse_remote(self, remote_url: str) -> tuple[Optional[str], Optional[str]]:
         """
         Extracts (owner, repo) from a remote URL.
+
+        Args:
+            remote_url (str): The git remote URL.
+
+        Returns:
+            tuple[Optional[str], Optional[str]]: A tuple of (owner, repo), or (None, None) if parsing fails.
         """
         # Remove .git suffix
         if remote_url.endswith(".git"):
@@ -76,7 +105,20 @@ class GitHubPlugin(PluginInterface):
             return match.group(1), match.group(2)
         return None, None
 
-    def _process_pr(self, owner: str, repo: str, pr_number: str, commit_node: Node, graph_api: GraphInterface):
+    def _process_pr(self, owner: str, repo: str, pr_number: str, commit_node: Node, graph_api: GraphInterface) -> None:
+        """
+        Fetch PR metadata and integrate it into the knowledge graph.
+
+        Args:
+            owner (str): The repository owner's username.
+            repo (str): The repository name.
+            pr_number (str): The pull request number.
+            commit_node (Node): The node representing the commit that referenced the PR.
+            graph_api (GraphInterface): The interface for graph updates.
+
+        Returns:
+            None
+        """
         cache_key = (owner, repo, pr_number)
         
         if cache_key in self.pr_cache:

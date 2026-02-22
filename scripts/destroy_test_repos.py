@@ -5,6 +5,12 @@ from rich.console import Console
 console = Console()
 
 def main():
+    """
+    Remove the temporary directory containing test repositories.
+
+    Returns:
+        None
+    """
     base_dir = Path("/tmp/gdskg_test_repos")
     if base_dir.exists():
         console.print(f"[yellow]Removing {base_dir}...[/yellow]")

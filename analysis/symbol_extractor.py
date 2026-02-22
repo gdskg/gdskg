@@ -340,8 +340,16 @@ class SymbolExtractor:
 
     def extract_modified_functions(self, file_content: str, language: str, affected_lines: Set[int], tree=None) -> Dict[str, str]:
         """
-        Identify functions/methods that were directly modified.
-        Return their canonical names and source text.
+        Identify functions and methods that were directly modified in the given lines.
+
+        Args:
+            file_content (str): The source code content.
+            language (str): The programming language.
+            affected_lines (Set[int]): Lines changed in the current commit.
+            tree: Optional tree-sitter Tree.
+
+        Returns:
+            Dict[str, str]: A mapping of canonical function names to their current source text.
         """
         if tree is None:
             parser = TreeSitterUtils.get_parser(language)
@@ -384,6 +392,7 @@ class SymbolExtractor:
 
         traverse(root_node)
         return modified_functions
+
     def extract_comments(self, file_content: str, language: str, affected_lines: Set[int], tree=None) -> List[Tuple[str, str, int]]:
         """
         Extract docstrings and inline comments that intersect with affected lines.
@@ -456,7 +465,14 @@ class SymbolExtractor:
     def extract_all_symbols(self, file_content: str, language: str, tree=None) -> Tuple[Dict[str, str], Dict[str, str]]:
         """
         Combined single-traversal extraction of both definitions and full symbol table.
-        Returns (definitions, symbol_table) in one pass instead of two.
+
+        Args:
+            file_content (str): The source code content.
+            language (str): The programming language.
+            tree: Optional tree-sitter Tree.
+
+        Returns:
+             Tuple[Dict[str, str], Dict[str, str]]: A tuple containing (definitions_mapping, full_symbol_table).
         """
         if tree is None:
             parser = TreeSitterUtils.get_parser(language)
@@ -492,8 +508,17 @@ class SymbolExtractor:
     def analyze_diff(self, file_content: str, language: str, affected_lines: Set[int],
                      symbol_table: Dict[str, str] = None, tree=None) -> Tuple[List[str], Dict[str, str], List[Tuple[str, str, int]]]:
         """
-        Combined single-traversal analysis of affected lines.
-        Returns (modified_symbols, modified_functions, comments) in one pass instead of three.
+        Combined single-traversal analysis of affected lines to identify modified symbols, functions, and comments.
+
+        Args:
+            file_content (str): The source code content.
+            language (str): The programming language.
+            affected_lines (Set[int]): A set of changed line numbers.
+            symbol_table (Dict[str, str], optional): A mapping of local aliases to canonical names.
+            tree: Optional tree-sitter Tree.
+
+        Returns:
+            Tuple[List[str], Dict[str, str], List[Tuple[str, str, int]]]: (modified_symbols, modified_functions, comments).
         """
         empty_result = ([], {}, [])
         if not affected_lines:

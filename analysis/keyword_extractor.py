@@ -13,6 +13,10 @@ class KeywordExtractor:
     """
 
     def __init__(self):
+        """
+        Initialize the KeywordExtractor, ensuring all necessary NLTK corpora and 
+        tokenizers are downloaded and ready for use.
+        """
         # Initialize NLTK components, downloading if necessary
         try:
             nltk.data.find('corpora/stopwords')
@@ -124,11 +128,11 @@ class KeywordExtractor:
         Identify the most frequent terms from a collection of counts.
         
         Args:
-            term_counts (Counter): Frequency of terms encountered.
-            top_n (int): Maximum number of terms to return.
-            min_freq (int): Minimum frequency for a term to be considered "major".
+            term_counts (collections.Counter): A counter object containing term frequencies.
+            top_n (int): The maximum number of top terms to return. Defaults to 50.
+            min_freq (int): The minimum frequency required for a term to be returned. Defaults to 2.
             
         Returns:
-            List[str]: List of top terms.
+            List[str]: A list of the most frequent terms that meet the criteria.
         """
         return [term for term, count in term_counts.most_common(top_n) if count >= min_freq]

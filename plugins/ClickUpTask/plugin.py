@@ -10,7 +10,17 @@ from core.schema import Node, Edge, NodeType
 logger = logging.getLogger(__name__)
 
 class ClickUpPlugin(PluginInterface):
+    """
+    Plugin for enriching the graph with ClickUp task metadata.
+    
+    Identifies task references in commit messages using customizable regex
+    and fetches task details like titles, statuses, and descriptions from the ClickUp API.
+    """
+    
     def __init__(self):
+        """
+        Initialize the ClickUp plugin and retrieve the API key from environment variables.
+        """
         self.api_key = os.environ.get("CLICKUP_API_KEY")
         self.enabled = True
         if not self.api_key:
@@ -21,6 +31,19 @@ class ClickUpPlugin(PluginInterface):
         self.task_cache = {}
 
     def process(self, commit_node: Node, related_nodes: List[Node], related_edges: List[Edge], graph_api: GraphInterface, config: Dict[str, Any] = None) -> None:
+        """
+        Identify task references in commit messages and fetch metadata.
+
+        Args:
+            commit_node (Node): The node representing the current commit.
+            related_nodes (List[Node]): Nodes connected to the commit.
+            related_edges (List[Edge]): Edges connected to the commit.
+            graph_api (GraphInterface): The API for adding new nodes/edges.
+            config (Dict[str, Any], optional): Plugin configuration. Defaults to None.
+
+        Returns:
+            None
+        """
         if not self.enabled:
             return
         
@@ -73,7 +96,19 @@ class ClickUpPlugin(PluginInterface):
                 
             self._process_task(task_id, organization_id, commit_node, graph_api)
 
-    def _process_task(self, task_id: str, team_id: str, commit_node: Node, graph_api: GraphInterface):
+    def _process_task(self, task_id: str, team_id: str, commit_node: Node, graph_api: GraphInterface) -> None:
+        """
+        Fetch ClickUp task details and link them to the current commit in the graph.
+
+        Args:
+            task_id (str): The unique ID of the ClickUp task.
+            team_id (str): The ClickUp team (organization) ID.
+            commit_node (Node): The node representing the referencing commit.
+            graph_api (GraphInterface): The interface for graph updates.
+
+        Returns:
+            None
+        """
         cache_key = task_id
         if cache_key in self.task_cache:
             task_data = self.task_cache[cache_key]

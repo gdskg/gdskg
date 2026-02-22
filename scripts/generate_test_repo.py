@@ -9,6 +9,15 @@ app = typer.Typer()
 console = Console()
 
 def setup_repo(name: str):
+    """
+    Initialize a new clean Git repository for testing purposes.
+
+    Args:
+        name (str): The name of the repository to create.
+
+    Returns:
+        tuple: (git.Repo, Path) The initialized repository object and its filesystem path.
+    """
     # Create in /tmp or local tmp
     base_dir = Path("/tmp/gdskg_test_repos")
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -24,7 +33,12 @@ def setup_repo(name: str):
 
 @app.command()
 def python_repo():
-    """Create a Python-focused test repository."""
+    """
+    Create a Python-focused test repository.
+
+    Returns:
+        None
+    """
     repo, repo_path = setup_repo("python_test_repo")
     
     # 1. Initial Commit
@@ -56,7 +70,12 @@ def python_repo():
 
 @app.command()
 def typescript_repo():
-    """Create a TypeScript-focused test repository."""
+    """
+    Create a TypeScript-focused test repository.
+
+    Returns:
+        None
+    """
     repo, repo_path = setup_repo("typescript_test_repo")
     
     # 1. Init
@@ -83,7 +102,12 @@ def typescript_repo():
 
 @app.command()
 def react_repo():
-    """Create a React-focused test repository."""
+    """
+    Create a React-focused test repository.
+
+    Returns:
+        None
+    """
     repo, repo_path = setup_repo("react_test_repo")
     
     # 1. Init
@@ -104,7 +128,12 @@ def react_repo():
 
 @app.command()
 def c_repo():
-    """Create a C-focused test repository."""
+    """
+    Create a C-focused test repository.
+
+    Returns:
+        None
+    """
     repo, repo_path = setup_repo("c_test_repo")
     
     # 1. Init
@@ -126,7 +155,12 @@ def c_repo():
 
 @app.command()
 def misc_repo():
-    """Create a repository with miscellaneous file types for testing."""
+    """
+    Create a repository with miscellaneous file types for testing.
+
+    Returns:
+        None
+    """
     repo, repo_path = setup_repo("misc_test_repo")
     
     # 1. Initial Commit

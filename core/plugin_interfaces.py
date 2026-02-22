@@ -18,8 +18,11 @@ class GraphInterface(ABC):
 
         Args:
             id (str): Unique identifier for the node.
-            type (str): The type of the node.
-            attributes (Dict[str, Any], optional): Properties of the node.
+            type (str): The node type (must be a valid NodeType value).
+            attributes (Dict[str, Any], optional): Properties of the node. Defaults to None.
+
+        Returns:
+            None
         """
 
         pass
@@ -32,8 +35,11 @@ class GraphInterface(ABC):
         Args:
             source_id (str): The identifier of the source node.
             target_id (str): The identifier of the target node.
-            type (str): The type of the relationship.
-            attributes (Dict[str, Any], optional): Properties of the edge.
+            type (str): The relationship type (must be a valid EdgeType value).
+            attributes (Dict[str, Any], optional): Properties of the edge. Defaults to None.
+
+        Returns:
+            None
         """
 
         pass
@@ -54,10 +60,13 @@ class PluginInterface(ABC):
 
         Args:
             commit_node (Node): The node representing the current commit.
-            related_nodes (List[Node]): A list of nodes directly connected to the commit.
-            related_edges (List[Edge]): A list of edges connected to the commit.
-            graph_api (GraphInterface): The API object for adding to the graph.
-            config (Dict[str, Any], optional): Plugin-specific configuration values.
+            related_nodes (List[Node]): Nodes directly connected to the commit in the core graph.
+            related_edges (List[Edge]): Edges connected to the commit in the core graph.
+            graph_api (GraphInterface): The API for adding new elements to the graph.
+            config (Dict[str, Any], optional): Plugin-specific configuration. Defaults to None.
+
+        Returns:
+            None
         """
         pass
 

@@ -67,6 +67,9 @@ class Node:
     def key(self) -> str:
         """
         Alias for the node's unique identifier.
+
+        Returns:
+            str: The node ID.
         """
         return self.id
 
@@ -96,6 +99,9 @@ class Edge:
         Generate a deterministic unique identifier for the edge.
         
         The ID is derived from a SHA-256 hash of the source ID, target ID, and edge type.
+
+        Returns:
+            str: A 64-character hex SHA-256 hash.
         """
 
         raw = f"{self.source_id}|{self.target_id}|{self.type}"
