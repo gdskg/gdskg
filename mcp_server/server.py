@@ -114,6 +114,8 @@ def query_knowledge_graph(
     relationships to give you a deep picture of the code. Use this whenever the user asks about how things 
     were built, who changed what, or to find conceptually similar code across a repository.
     
+    IMPORTANT: If you feel that the results of your query aren't exactly what you need, try again with different wording! The exact wording you use strongly influences BOTH the keyword matching and the semantic vector search.
+    
     Args:
         query: Your search query. Use natural language to describe what you're looking for (e.g. "authentication logic", "how are database connections pooled").
         graph_path: Path to the knowledge graph SQLite database directory. Defaults to './gdskg_graph'.
@@ -121,7 +123,7 @@ def query_knowledge_graph(
         depth: Traversal depth for finding related nodes (0=direct matches only, 1=immediate neighbors, 2+=deeper API tracing). Default is 2.
         traverse_types: Optional list of node types to traverse through (e.g., ['File', 'Symbol']). Restricts which relationship types are followed.
         repo_name: Optional repository name to scope the search to if multiple are indexed.
-        semantic_only: If True, uses semantic search exclusively and ignores keywords. Useful when looking for abstract concepts.
+        semantic_only: If True, uses semantic search exclusively and completely ignores keyword matching. Use this if you want to avoid catching common or noisy keywords in your query and focus entirely on conceptual semantics!
         min_score: (Advanced/Internal) Minimum relevance threshold. WARNING: Do NOT modify this value. Changing this is highly discouraged and will likely hide valid results.
         top_n: Maximum number of base commits to seed the search. INCREASE this value (e.g., 10 or 20) if you want a larger, more comprehensive set of results!
         plugins: Optional list of runtime plugins to execute on the results (e.g., ['GitHubPR']). It is safe and non-blocking to use these even if API authentication is not set up—they will simply return a warning without crashing. Use them!
