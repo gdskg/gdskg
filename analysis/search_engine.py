@@ -286,7 +286,7 @@ class SearchEngine:
             if num_files > 0:
                 penalty = max(1.0, math.log10(num_files))
                 if penalty > 1.0:
-                    cdict["relevance"] /= (penalty * 3)
+                    cdict["relevance"] /= (penalty)
                     cdict["reasons"].append(f"Penalized relevance (divided by {penalty:.2f}) for modifying {num_files} files")
 
     def _run_graph_traversal(self, cursor: sqlite3.Cursor, top_commits: List[Dict], depth: int, keywords: List[str], semantic_set: Set[str], allowed_types: Set[str], all_matches: bool, all_files: bool):
