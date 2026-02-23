@@ -53,6 +53,12 @@ class ONNXEmbedder:
         
         print("Download complete.", file=sys.stderr)
 
+    def prepare(self):
+        """
+        Public method to ensure the model and tokenizer are downloaded and ready.
+        """
+        self._load()
+
     def _load(self):
         """
         Load the tokenizer and ONNX inference session into memory.

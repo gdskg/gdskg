@@ -8,12 +8,7 @@
                 "run",
                 "-i",
                 "--rm",
-                "-e",
-                "GITHUB_TOKEN=<GITHUB_TOKEN>",
-                "<YOUR_CUSTOM_IMAGE_URL>",
-                "serve",
-                "--transport",
-                "stdio"
+                "your-gdskg-image-name"
             ]
         },
         "gdskg_local": {

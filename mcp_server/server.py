@@ -91,7 +91,7 @@ def query_knowledge_graph(
     plugins: Optional[List[str]] = None,
     parameters: Optional[List[str]] = None,
     filters: Optional[List[str]] = None,
-) -> str:
+) -> Dict[str, Any]:
     """
     Query the Git-Derived Software Knowledge Graph.
 
@@ -109,14 +109,14 @@ def query_knowledge_graph(
         filters (List[str], optional): Metadata filters in 'Type:Value' format. Defaults to None.
 
     Returns:
-        str: A formatted string containing the search results or an error message.
+        Dict[str, Any]: A dictionary containing a human-readable summary and hydrated search results.
     """
     if not _read_server_status():
-        return "Server is stopped. Please start the server first."
+        return {"error": "Server is stopped. Please start the server first."}
 
     db_path = DEFAULT_GRAPH_PATH / "gdskg.db"
     if not db_path.exists():
-        return f"Warning: Knowledge Graph Database not found at '{db_path}'. Use `index_repository` first."
+        return {"warning": f"Knowledge Graph Database not found at '{db_path}'. Use `index_repository` first."}
 
     try:
         from analysis.search_engine import SearchEngine
@@ -131,11 +131,40 @@ def query_knowledge_graph(
             results = searcher.search(query, repo_name=repo_name, depth=depth, traverse_types=traverse_types, semantic_only=semantic_only, min_score=min_score, top_n=top_n)
 
         if not results:
-            return "No relevant matches found."
+            return {"message": "No relevant matches found.", "results": []}
 
-        return _format_query_results(query, results, limit)
+        formatted_text = _format_query_results(query, results, limit)
+        
+        # Hydrate results with raw metadata for the AI
+        hydrated_results = []
+        for res in results[:limit]:
+            hydrated_res = {
+                "id": res["id"],
+                "type": NodeType.COMMIT.value,
+                "relevance": res["relevance"],
+                "message": res["message"],
+                "author": res["author"],
+                "date": res["date"],
+                "raw_metadata": {
+                    "commit_id": res["id"],
+                    "related_nodes": []
+                }
+            }
+            
+            for node_id, info in res.get('connections', {}).items():
+                hydrated_res["raw_metadata"]["related_nodes"].append({
+                    "id": node_id,
+                    "type": info["type"],
+                    "attributes": info.get("attributes", {})
+                })
+            hydrated_results.append(hydrated_res)
+
+        return {
+            "description": formatted_text,
+            "results": hydrated_results
+        }
     except Exception as e:
-        return f"Error querying graph: {str(e)}"
+        return {"error": f"Error querying graph: {str(e)}"}
 
 def _parse_filters(filters: Optional[List[str]]) -> Dict[str, str]:
     """
@@ -545,3 +574,31 @@ def get_ast_nodes(
         return output
     except Exception as e:
         return f"Error querying graph: {str(e)}"
+
+@mcp.tool()
+def get_dependencies(
+    node_id: str
+) -> Dict[str, Any]:
+    """
+    Retrieve what a node uses (dependencies) and what uses it (dependents).
+    
+    Args:
+        node_id (str): The ID of the node (repo, file, function, symbol). 
+                      Supports fuzzy path resolution (e.g., 'AccountCard.tsx').
+                      
+    Returns:
+        Dict[str, Any]: A map of dependencies and dependents.
+    """
+    if not _read_server_status():
+        return {"error": "Server is stopped."}
+
+    db_path = DEFAULT_GRAPH_PATH / "gdskg.db"
+    if not db_path.exists():
+        return {"error": "Index repo first."}
+
+    try:
+        from analysis.search_engine import SearchEngine
+        searcher = SearchEngine(str(db_path))
+        return searcher.get_dependencies(node_id)
+    except Exception as e:
+        return {"error": f"Error retrieving dependencies: {str(e)}"}

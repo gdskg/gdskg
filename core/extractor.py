@@ -115,6 +115,7 @@ class GraphExtractor:
             type=NodeType.REPOSITORY,
             attributes={
                 "name": self.repo_path.name,
+                "root_path": str(self.repo_path.resolve()),
                 "remotes": [r.url for r in self.repo.remotes]
             }
         )

@@ -197,6 +197,21 @@ def history(
     console.print(result)
 
 @app.command()
+def prepare():
+    """
+    Pre-download external assets (models, etc.) needed for GDSKG.
+    """
+    console.print("[bold green]Preparing GDSKG Assets[/bold green]")
+    try:
+        from analysis.embedder import ONNXEmbedder
+        embedder = ONNXEmbedder()
+        embedder.prepare()
+        console.print("[bold green]✓ All models downloaded and verified.[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]✗ Preparation failed:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+@app.command()
 def serve(
     transport: str = typer.Option("sse", "--transport", "-t", help="Transport protocol: 'sse' or 'stdio'"),
     port: int = typer.Option(8015, "--port", "-p", help="Port to listen on (SSE only)"),

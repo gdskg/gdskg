@@ -21,6 +21,7 @@ COPY analysis/ ./analysis/
 COPY mcp_server/ ./mcp_server/
 COPY plugins/ ./plugins/
 COPY VERSION .
+RUN python main.py prepare
 
 # Define environment variables
 ENV PYTHONUNBUFFERED=1

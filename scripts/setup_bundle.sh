@@ -107,6 +107,7 @@ RUN chown -R root:root /app/vector_db /app/graph_db
 # Override environment variables to point to bundled data
 ENV GDSKG_VECTOR_DB_DIR=/app/vector_db
 ENV GDSKG_GRAPH_DB_DIR=/app/graph_db
+ENV GDSKG_MODEL_DIR=/root/.gdskg/models
 
 # Default command - specifically configured for serving in Docker
 ENTRYPOINT ["python", "main.py", "serve"]
