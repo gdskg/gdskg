@@ -56,6 +56,7 @@ Point your MCP-compatible client to `http://localhost:8015/mcp` (or hook up the 
 - `query_knowledge_graph`: AI can search contexts, trace logic paths, and uncover architecture.
 - `get_function_history`: AI can pull the exact historical transformation of any function block.
 - `get_ast_nodes`: AI can retrieve the deep Abstract Syntax Tree linked directly to an active file or function version in the current HEAD.
+- `get_dependencies`: AI can discover what a node (file, function, symbol) uses and what uses it, with human-readable names and node types for all relationships.
 
 ### 3. Ask Questions
 Just ask your AI: *"Index the repository at `https://github.com/gdskg/gdskg` and then explain how the semantic search system evolved over the last year. Give me specific commits and related files."*
@@ -178,6 +179,9 @@ python main.py history "calculate_total" -G ./graph_output
 
 # View the full AST structure of a specific file or function node
 python main.py ast "analysis/search_engine.py" -G ./graph_output --depth 3
+
+# Explore dependencies and dependents for a specific node (fuzzy matching supported)
+python main.py dependencies "SearchEngine" -G ./graph_output
 ```
 
 ---

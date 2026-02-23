@@ -422,9 +422,42 @@ class SearchEngine:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
-            # 1. Determine the node type
-            cursor.execute("SELECT type, attributes FROM nodes WHERE id = ?", (node_id,))
+            # 1. Determine the node type (with fuzzy resolution)
+            supported_types = (NodeType.FILE.value, NodeType.FUNCTION.value, NodeType.FUNCTION_VERSION.value)
+            cursor.execute("SELECT id, type, attributes FROM nodes WHERE id = ?", (node_id,))
             row = cursor.fetchone()
+            
+            # If exact match exists but is NOT a supported type, ignore it and try fuzzy
+            if row and row[1] not in supported_types:
+                row = None
+
+            if not row:
+                # Try fuzzy matching
+                placeholders = ",".join("?" * len(supported_types))
+                cursor.execute(f"SELECT id, type, attributes FROM nodes WHERE type IN ({placeholders}) AND (id LIKE ? OR id LIKE ?)", supported_types + (f"%{node_id}%", f"FILE:%{node_id}%"))
+                fuzzy_matches = cursor.fetchall()
+                
+                if len(fuzzy_matches) == 1:
+                    row = fuzzy_matches[0]
+                    node_id = row[0]
+                elif len(fuzzy_matches) > 1:
+                    # Prioritize FILE nodes if multiple matches found
+                    file_matches = [m for m in fuzzy_matches if m[1] == 'FILE']
+                    if len(file_matches) == 1:
+                        row = file_matches[0]
+                        node_id = row[0]
+                    else:
+                        # Prefer exact basename match if possible
+                        basename = node_id.split('/')[-1]
+                        exact_basename_matches = [m for m in fuzzy_matches if m[0].endswith(basename)]
+                        if len(exact_basename_matches) == 1:
+                            row = exact_basename_matches[0]
+                            node_id = row[0]
+                        else:
+                            # Return ambiguity error
+                            suggestions = "\n".join(f"- {m[0]}" for m in fuzzy_matches[:5])
+                            raise ValueError(f"Ambiguous node identifier '{node_id}'. Multiple matches found:\n{suggestions}")
+            
             if not row:
                 base_msg = f"Node '{node_id}' does not exist in the graph. Check the format (e.g., 'FILE:path/to/file.py' or 'FUNCTION:pkg.module.function')."
                 
@@ -442,7 +475,8 @@ class SearchEngine:
                     raise ValueError(f"{base_msg}\nDid you mean:\n{suggestions}")
                 raise ValueError(base_msg)
                 
-            ntype, attrs_json = row
+            actual_id, ntype, attrs_json = row
+            node_id = actual_id
             attrs = json.loads(attrs_json) if attrs_json else {}
             
             file_content = ""
@@ -457,25 +491,35 @@ class SearchEngine:
                     Path(self.db_path).parent.parent / rel_path
                 ]
                 
-                # Check for cached clone in `.gdskg/cache` matching the repository name
-                cursor.execute("SELECT id FROM nodes WHERE type = ?", (NodeType.REPOSITORY.value,))
+                # Check for cached clone or root_path metadata in the REPOSITORY node
+                cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.REPOSITORY.value,))
                 repo_row = cursor.fetchone()
                 if repo_row:
-                    repo_name = repo_row[0]
-                    cache_dir = Path.home() / ".gdskg" / "cache" / repo_name
+                    repo_id, repo_attrs_json = repo_row
+                    repo_attrs = json.loads(repo_attrs_json) if repo_attrs_json else {}
+                    
+                    # Try root_path if available
+                    root_path = repo_attrs.get("root_path")
+                    if root_path:
+                        try_paths.append(Path(root_path) / rel_path)
+                    
+                    # Try relative to the repo_id (legacy fallback)
+                    try_paths.append(Path(repo_id) / rel_path)
+                    
+                    cache_dir = Path.home() / ".gdskg" / "cache" / repo_id
                     if cache_dir.exists():
                         try_paths.append(cache_dir / rel_path)
                 
                 file_path = None
                 for p in try_paths:
-                    if p.exists():
+                    if p.exists() and p.is_file():
                         file_path = p
                         break
                         
                 if not file_path:
                     # Provide an informative error identifying the paths checked
                     checked = [str(p) for p in try_paths]
-                    raise ValueError(f"File '{rel_path}' could not be located on the filesystem. Checked relative to cwd and db_path: {checked}")
+                    raise ValueError(f"File '{rel_path}' could not be located on the filesystem. Checked: {checked}")
                 
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
@@ -527,10 +571,112 @@ class SearchEngine:
                 raise ValueError(f"Node '{node_id}' is of type '{ntype}'. AST extraction is only supported for FILE, FUNCTION, and FUNCTION_VERSION types.")
                 
         if not language:
-            raise ValueError(f"Could not determine correct tree-sitter language for '{node_id}'.")
+            raise ValueError(f"Could determine correct tree-sitter language for '{node_id}'.")
             
         # 2. Extract and filter AST nodes in memory
         nodes = AstExtractor.get_ast_nodes(file_content, language, max_depth, query)
         if not nodes:
             raise ValueError(f"AST extraction returned no nodes. The language '{language}' might not be installed or parseable, or the content could be empty.")
         return nodes
+
+    def get_dependencies(self, node_id: str) -> Dict[str, Any]:
+        """
+        Retrieve incoming and outgoing dependencies for a given node.
+        
+        Args:
+            node_id: The ID of the node to analyze.
+            
+        Returns:
+            A dictionary containing the node ID and its dependencies/dependents.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 1. Resolve node ID (fuzzy)
+            cursor.execute("SELECT id, type FROM nodes WHERE id = ?", (node_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                cursor.execute("SELECT id, type FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'SYMBOL', 'COMMIT') AND (id LIKE ? OR id LIKE ?)", (f"%{node_id}%", f"FILE:%{node_id}%"))
+                matches = cursor.fetchall()
+                if len(matches) == 1:
+                    row = matches[0]
+                elif len(matches) > 1:
+                    basename = node_id.split('/')[-1]
+                    exact_basename_matches = [m for m in matches if m[0].endswith(basename)]
+                    if len(exact_basename_matches) == 1:
+                        row = exact_basename_matches[0]
+                    else:
+                        suggestions = "\n".join(f"- {m[0]}" for m in matches[:5])
+                        raise ValueError(f"Ambiguous node identifier '{node_id}'. Multiple matches found:\n{suggestions}")
+            
+            if not row:
+                 raise ValueError(f"Node '{node_id}' not found in graph.")
+                 
+            resolved_id, ntype = row
+            
+            # 2. Get outgoing edges (dependencies)
+            # We join with 'nodes' to get the type and attributes of the target
+            cursor.execute("""
+                SELECT e.target_id, e.type, n.type, n.attributes
+                FROM edges e 
+                JOIN nodes n ON e.target_id = n.id 
+                WHERE e.source_id = ? 
+                AND e.type NOT IN ('CONTAINS_COMMENT', 'HAS_KEYWORD')
+            """, (resolved_id,))
+            
+            dependencies = []
+            for tid, etype, target_ntype, attrs_json in cursor.fetchall():
+                attrs = json.loads(attrs_json) if attrs_json else {}
+                # Extract a readable name
+                name = attrs.get('name')
+                if not name:
+                    if target_ntype == NodeType.FILE.value:
+                        name = tid.split('/')[-1].split(':')[-1]
+                    elif target_ntype == NodeType.COMMIT.value:
+                        name = attrs.get('message', '').split('\n')[0] or tid[:8]
+                    else:
+                        name = tid
+                
+                dependencies.append({
+                    "id": tid, 
+                    "name": name,
+                    "type": etype, 
+                    "node_type": target_ntype
+                })
+            
+            # 3. Get incoming edges (dependents)
+            cursor.execute("""
+                SELECT e.source_id, e.type, n.type, n.attributes
+                FROM edges e 
+                JOIN nodes n ON e.source_id = n.id 
+                WHERE e.target_id = ? 
+                AND e.type NOT IN ('CONTAINS_COMMENT', 'HAS_KEYWORD')
+            """, (resolved_id,))
+            
+            dependents = []
+            for sid, etype, source_ntype, attrs_json in cursor.fetchall():
+                attrs = json.loads(attrs_json) if attrs_json else {}
+                # Extract a readable name
+                name = attrs.get('name')
+                if not name:
+                    if source_ntype == NodeType.FILE.value:
+                        name = sid.split('/')[-1].split(':')[-1]
+                    elif source_ntype == NodeType.COMMIT.value:
+                        name = attrs.get('message', '').split('\n')[0] or sid[:8]
+                    else:
+                        name = sid
+                
+                dependents.append({
+                    "id": sid, 
+                    "name": name,
+                    "type": etype, 
+                    "node_type": source_ntype
+                })
+            
+            return {
+                "node": resolved_id,
+                "type": ntype,
+                "dependencies": dependencies,
+                "dependents": dependents
+            }
