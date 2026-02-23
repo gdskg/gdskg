@@ -15,7 +15,10 @@ else
     UNAME_S := $(shell uname -s)
 endif
 
-.PHONY: all clean venv install build docker-build docker-run docker-clean
+.PHONY: all clean venv install build docker-build docker-run docker-clean setup
+
+setup:
+	@bash scripts/setup_bundle.sh
 
 all: build
 
@@ -58,7 +61,9 @@ docker-run:
 	docker run -d \
 		--name gdskg-server \
 		-p 8015:8015 \
-		-v $(shell pwd)/gdskg_graph:/app/gdskg_graph \
+		-v $(shell pwd)/graph_db:/app/graph_db \
+		-e GDSKG_GRAPH_DB_DIR=/app/graph_db \
+		-e GDSKG_VECTOR_DB_DIR=/app/vector_db \
 		-e GITHUB_PAT \
 		gdskg:latest
 	@echo "Server is running in background. Logs available via 'docker logs -f gdskg-server'"

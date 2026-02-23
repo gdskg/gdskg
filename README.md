@@ -125,6 +125,24 @@ This will automatically build a specialized `gdskg` image that contains your rep
 
 ---
 
+## Local Interactive Setup (Manual Bundle)
+
+If you want to build a bundled image locally without setting up a GitHub Action, you can use our interactive setup script. This is the easiest way to get an "all-in-one" image for local testing or sharing.
+
+```bash
+# From the root of the gdskg repository
+make setup
+```
+
+The script will interactively guide you through:
+1.  Entering the repositories you want to index.
+2.  Providing an optional GitHub Token (PAT) for private repos.
+3.  Naming your final Docker image.
+
+Once finished, you will have a local Docker image (e.g., `gdskg-bundled`) that contains the pre-indexed knowledge graph for all specified repositories. You can use it in your MCP config immediately!
+
+---
+
 ## CLI Usage (For Developers)
 
 If you prefer to use GDSKG directly from your terminal to investigate your local projects:
