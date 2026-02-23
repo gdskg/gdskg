@@ -55,11 +55,73 @@ Point your MCP-compatible client to `http://localhost:8015/mcp` (or hook up the 
 - `index_repository`: AI can dynamically clone and parse public/private repos.
 - `query_knowledge_graph`: AI can search contexts, trace logic paths, and uncover architecture.
 - `get_function_history`: AI can pull the exact historical transformation of any function block.
+- `get_ast_nodes`: AI can retrieve the deep Abstract Syntax Tree linked directly to an active file or function version in the current HEAD.
 
 ### 3. Ask Questions
 Just ask your AI: *"Index the repository at `https://github.com/gdskg/gdskg` and then explain how the semantic search system evolved over the last year. Give me specific commits and related files."*
 
 The AI will handle cloning, parsing, graph-building, and querying for you securely.
+
+---
+
+## Build Your Own GDSKG Image (GitHub Action)
+
+If you want to pre-compute the knowledge graph for your repositories and bake it directly into a Docker image (perfect for team environments or faster AI startup times), you can use our built-in GitHub Action.
+
+Create a `.github/workflows/gdskg.yml` file in your repository:
+
+```yaml
+name: Build Custom GDSKG Image
+on:
+  schedule:
+    - cron: '0 0 * * *' # Recommended: Run daily at midnight
+  workflow_dispatch: # Allows manual triggering
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run GDSKG Build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Or custom PAT
+        run: |
+          mkdir -p graph_db vector_db
+          
+          if [ -n "$GITHUB_TOKEN" ]; then
+            TARGET_REPO="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}"
+          else
+            TARGET_REPO="https://github.com/${{ github.repository }}"
+          fi
+          
+          docker run --rm \
+            -v $(pwd)/graph_db:/app/graph_db -v $(pwd)/vector_db:/app/vector_db \
+            ghcr.io/gdskg/gdskg:latest build --repository "$TARGET_REPO" --graph /app/graph_db
+      
+      - name: Build custom image
+        run: |
+          cat <<EOF > Dockerfile.custom
+          FROM ghcr.io/gdskg/gdskg:latest
+          COPY graph_db/ /app/graph_db/
+          COPY vector_db/ /app/vector_db/
+          RUN chown -R root:root /app/vector_db /app/graph_db
+          EOF
+          docker build -t ghcr.io/${{ github.repository }}-gdskg:latest -f Dockerfile.custom .
+          docker push ghcr.io/${{ github.repository }}-gdskg:latest
+```
+
+This will automatically build a specialized `gdskg` image that contains your repository's full knowledge graph!
 
 ---
 
@@ -95,6 +157,9 @@ python main.py query "auth" -G ./graph_output -D 2 -T File
 
 # Extract the entire evolution of a specific function
 python main.py history "calculate_total" -G ./graph_output
+
+# View the full AST structure of a specific file or function node
+python main.py ast "analysis/search_engine.py" -G ./graph_output --depth 3
 ```
 
 ---
@@ -120,9 +185,11 @@ GDSKG creates a multi-dimensional map of your code:
 | **`AUTHOR`** | Unique developer entities based on email. |
 | **`FILE`** | Filesystem paths touched across the history. |
 | **`SYMBOL`** | Logical code entities (Functions, Classes). |
+| **`FUNCTION_VERSION`** | Exact content of a function at a point in time. |
 | **`COMMIT_MESSAGE`** | The raw text of commit messages, deduplicated across the graph. |
+| **`AST_NODE`** | Tree-sitter AST nodes comprising the syntax structure of the *current HEAD* state. |
 
-These are connected by edges like `AUTHORED_BY`, `MODIFIED_SYMBOL`, and `MODIFIED_FILE` allowing for powerful graph-traversal queries.
+These are connected by edges like `AUTHORED_BY`, `MODIFIED_SYMBOL`, `MODIFIED_FILE`, and `CURRENT_VERSION` allowing for powerful graph-traversal queries.
 
 ---
 

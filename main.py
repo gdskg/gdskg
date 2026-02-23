@@ -133,6 +133,48 @@ def query(
     _display_results_table(results, query_str, depth, show_matches, top_n)
 
 @app.command()
+def ast(
+    node_id: str = typer.Argument(..., help="The ID of the FILE or FUNCTION_VERSION node to get AST for"),
+    graph: Path = typer.Option(..., "--graph", "-G", help="Directory where the knowledge graph is stored", exists=True, file_okay=False, dir_okay=True, resolve_path=True),
+    depth: int = typer.Option(0, "--depth", "-d", help="How many levels of the AST to retrieve (0 for all)"),
+    query: Optional[str] = typer.Option(None, "--query", "-q", help="Filter AST nodes by semantic similarity to a query"),
+):
+    """
+    Retrieve the exact AST tree linked to a file or function node.
+    """
+    try:
+        db_path = _prepare_database_path(graph, overwrite=False)
+        engine = SearchEngine(str(db_path))
+        
+        nodes = engine.get_ast_nodes(node_id, depth, query=query)
+        
+        if not nodes:
+            console.print(f"[yellow]No AST nodes found linked from {node_id}[/yellow]")
+            raise typer.Exit(1)
+            
+        if query:
+            console.print(f"[bold green]Found {len(nodes)} AST nodes matching '{query}' from {node_id}:[/bold green]")
+            for node in nodes:
+                safe_text = node['attributes'].get('text', '').replace('\n', ' ')
+                if safe_text:
+                    safe_text = f" -> '{safe_text}'"
+                sim_str = f" [score: {node['similarity']:.2f}]"
+                console.print(f" - [cyan]{node['id']}[/cyan] ({node['attributes'].get('ast_type', 'unknown')}){safe_text}{sim_str}")
+        else:
+            console.print(f"[bold green]Found {len(nodes)} AST nodes linked from {node_id}:[/bold green]")
+            for node in nodes:
+                # print basic info for CLI viewing, since ASTs can be huge
+                safe_text = node['attributes'].get('text', '').replace('\n', ' ')
+                if safe_text:
+                    safe_text = f" -> '{safe_text}'"
+                console.print(f" - [cyan]{node['id']}[/cyan] ({node['attributes'].get('ast_type', 'unknown')}){safe_text}")
+    except Exception as e:
+        console.print(f"[bold red]Error formatting AST output: {e}[/bold red]")
+        import traceback
+        traceback.print_exc()
+        raise typer.Exit(1)
+
+@app.command()
 def history(
     function_name: str = typer.Argument(..., help="Name of the function to get history for"),
     graph: Path = typer.Option(..., "--graph", "-G", help="Directory where the knowledge graph is stored", exists=True, file_okay=False, dir_okay=True, resolve_path=True),
@@ -151,7 +193,7 @@ def history(
     Returns:
         None
     """
-    result = get_function_history(function_name, graph_path=str(graph), plugins=plugins, parameters=parameters)
+    result = get_function_history(function_name, plugins=plugins, parameters=parameters)
     console.print(result)
 
 @app.command()
@@ -335,6 +377,7 @@ def _run_build_process(repo_path: Path, store: GraphStore, plugins: List[Any], p
             console.print(f"[bold green]✓[/bold green] Graph built with [blue]{store.count_nodes()}[/blue] nodes.")
             
             _run_semantic_indexing(db_path, progress)
+            
         except Exception as e:
             console.print(f"[bold red]✗ Build failed:[/bold red] {e}")
             raise typer.Exit(code=1)

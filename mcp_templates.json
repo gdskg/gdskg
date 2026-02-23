@@ -2,36 +2,31 @@
     "_comment": "Copy one of these entries into your IDE's mcp_config.json under 'mcpServers'. Replace placeholder paths and tokens with your own values.",
     "mcpServers": {
         "gdskg": {
-            "_comment": "Docker-based server (recommended). Requires: docker build -t gdskg:latest .",
+            "_comment": "Docker-based server (recommended).",
             "command": "docker",
             "args": [
                 "run",
                 "-i",
                 "--rm",
-                "-v",
-                "<YOUR_REPOS_DIR>:/repo",
-                "-v",
-                "<YOUR_GRAPH_OUTPUT_DIR>:/app/gdskg_graph",
                 "-e",
-                "GITHUB_PAT=<FINE_GRAIN_PAT>",
-                "gdskg:latest",
-                "serve",
+                "GITHUB_TOKEN=<GITHUB_TOKEN>",
+                "<YOUR_CUSTOM_IMAGE_URL>",
                 "--transport",
                 "stdio"
             ]
         },
-        "gdskg_cli": {
-            "_comment": "Standalone binary (built via 'make build'). No Docker required.",
-            "command": "./dist/gdskg-mcp",
+        "gdskg_local": {
+            "_comment": "Local python execution (requires requirements.txt installed). No Docker required.",
+            "command": "python",
             "args": [
+                "-m",
+                "main",
                 "serve",
                 "--transport",
-                "stdio",
-                "--graph",
-                "<YOUR_GRAPH_OUTPUT_DIR>"
+                "stdio"
             ],
             "env": {
-                "GITHUB_PAT": "<FINE_GRAIN_PAT>"
+                "GITHUB_TOKEN": "<GITHUB_TOKEN>"
             }
         }
     }

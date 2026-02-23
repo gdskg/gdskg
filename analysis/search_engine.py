@@ -52,7 +52,11 @@ class SearchEngine:
         query = query or ""
         keywords = self._extract_keywords(query)
         commits = {}
+        
+        # AST_NODE should not be traversed in a general semantic/keyword search
         allowed_types = {t.upper() for t in traverse_types} if traverse_types else set()
+        if allowed_types:
+            allowed_types.discard(NodeType.AST_NODE.value)
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -395,3 +399,138 @@ class SearchEngine:
             "date": attrs.get("timestamp", attrs.get("date", "Unknown")),
             "relevance": 0.0, "keyword_matches": {}, "semantic_matches": 0, "connections": {}, "reasons": []
         }
+
+    def get_ast_nodes(self, node_id: str, max_depth: int = 0, query: str = None) -> List[Dict]:
+        """
+        Retrieve the AST nodes linked to a given FILE or FUNCTION_VERSION node.
+        
+        Args:
+            node_id: The ID of the file or function version.
+            max_depth: Maximum depth to traverse the AST (0 for infinite).
+            query: Optional semantic query to filter AST nodes by similarity.
+            
+        Returns:
+            A list of dictionary node representations.
+        """
+        import json
+        from pathlib import Path
+        from analysis.ast_extractor import AstExtractor
+        from analysis.tree_sitter_utils import TreeSitterUtils
+        from core.schema import NodeType, EdgeType
+        import sqlite3
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 1. Determine the node type
+            cursor.execute("SELECT type, attributes FROM nodes WHERE id = ?", (node_id,))
+            row = cursor.fetchone()
+            if not row:
+                base_msg = f"Node '{node_id}' does not exist in the graph. Check the format (e.g., 'FILE:path/to/file.py' or 'FUNCTION:pkg.module.function')."
+                
+                # Try finding a similarly named node to suggest
+                cursor.execute("SELECT id FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'FUNCTION_VERSION') AND id LIKE ? LIMIT 5", (f"%{node_id}%",))
+                similar_nodes = [r[0] for r in cursor.fetchall()]
+                if not similar_nodes:
+                    # Try even looser search (basename equivalent)
+                    base_id = node_id.split('/')[-1].split(':')[-1]
+                    cursor.execute("SELECT id FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'FUNCTION_VERSION') AND id LIKE ? LIMIT 5", (f"%{base_id}%",))
+                    similar_nodes = [r[0] for r in cursor.fetchall()]
+                
+                if similar_nodes:
+                    suggestions = "\n".join(f"- {s}" for s in similar_nodes)
+                    raise ValueError(f"{base_msg}\nDid you mean:\n{suggestions}")
+                raise ValueError(base_msg)
+                
+            ntype, attrs_json = row
+            attrs = json.loads(attrs_json) if attrs_json else {}
+            
+            file_content = ""
+            language = ""
+            
+            if ntype == NodeType.FILE.value:
+                rel_path = node_id.replace("FILE:", "") if node_id.startswith("FILE:") else node_id
+                
+                # Dynamic fallback for finding the relative file path from repo root
+                try_paths = [
+                    Path.cwd() / rel_path,
+                    Path(self.db_path).parent.parent / rel_path
+                ]
+                
+                # Check for cached clone in `.gdskg/cache` matching the repository name
+                cursor.execute("SELECT id FROM nodes WHERE type = ?", (NodeType.REPOSITORY.value,))
+                repo_row = cursor.fetchone()
+                if repo_row:
+                    repo_name = repo_row[0]
+                    cache_dir = Path.home() / ".gdskg" / "cache" / repo_name
+                    if cache_dir.exists():
+                        try_paths.append(cache_dir / rel_path)
+                
+                file_path = None
+                for p in try_paths:
+                    if p.exists():
+                        file_path = p
+                        break
+                        
+                if not file_path:
+                    # Provide an informative error identifying the paths checked
+                    checked = [str(p) for p in try_paths]
+                    raise ValueError(f"File '{rel_path}' could not be located on the filesystem. Checked relative to cwd and db_path: {checked}")
+                
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        file_content = f.read()
+                except Exception as e:
+                    raise ValueError(f"Could not read file content for '{node_id}': {e}")
+                    
+                extension = attrs.get('extension', Path(file_path).suffix)
+                language = TreeSitterUtils.map_extension_to_language(extension)
+                
+            elif ntype == NodeType.FUNCTION_VERSION.value:
+                file_content = attrs.get('content', '')
+                if not file_content:
+                    raise ValueError(f"Function version '{node_id}' has no content stored in its attributes.")
+                
+                file_path = attrs.get('file_path', '')
+                extension = Path(file_path).suffix
+                language = TreeSitterUtils.map_extension_to_language(extension)
+                
+            elif ntype == NodeType.FUNCTION.value:
+                cursor.execute("""
+                    SELECT target_id FROM edges WHERE source_id = ? AND type = ?
+                """, (node_id, EdgeType.HAS_HISTORY.value))
+                history_row = cursor.fetchone()
+                if not history_row:
+                    raise ValueError(f"Function '{node_id}' has no history edge in the graph.")
+                
+                cursor.execute("""
+                    SELECT n.id, n.attributes FROM nodes n
+                    JOIN edges e ON n.id = e.target_id
+                    WHERE e.source_id = ? AND e.type = ?
+                    AND NOT EXISTS (
+                        SELECT 1 FROM edges e2 WHERE e2.source_id = n.id AND e2.type = ?
+                    )
+                """, (history_row[0], EdgeType.HAS_VERSION.value, EdgeType.PREVIOUS_VERSION.value))
+                
+                v_row = cursor.fetchone()
+                if not v_row:
+                    raise ValueError(f"Function '{node_id}' has a history group but no latest version node.")
+                
+                v_attrs = json.loads(v_row[1])
+                file_content = v_attrs.get('content', '')
+                extension = Path(v_attrs.get('file_path', '')).suffix
+                language = TreeSitterUtils.map_extension_to_language(extension)
+                if not file_content:
+                    raise ValueError(f"Latest version for function '{node_id}' has no stored content.")
+                
+            else:
+                raise ValueError(f"Node '{node_id}' is of type '{ntype}'. AST extraction is only supported for FILE, FUNCTION, and FUNCTION_VERSION types.")
+                
+        if not language:
+            raise ValueError(f"Could not determine correct tree-sitter language for '{node_id}'.")
+            
+        # 2. Extract and filter AST nodes in memory
+        nodes = AstExtractor.get_ast_nodes(file_content, language, max_depth, query)
+        if not nodes:
+            raise ValueError(f"AST extraction returned no nodes. The language '{language}' might not be installed or parseable, or the content could be empty.")
+        return nodes

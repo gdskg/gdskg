@@ -1,0 +1,98 @@
+name: Build Custom GDSKG Image
+on:
+  # UPDATE THIS: Choose when the action should run.
+  # Running it nightly via CRON is recommended.
+  schedule:
+    - cron: '0 0 * * *' # Run daily at midnight
+  # This allows you to trigger the workflow manually from the GitHub Actions UI
+  workflow_dispatch:
+  # Or you can trigger it on pushes to your main branch
+  push:
+    branches:
+      - main # UPDATE THIS: Replace with your default branch name if different
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # UPDATE THIS: The name of the resulting image.
+          # By default, this creates: ghcr.io/your-user/your-repo-gdskg
+          images: ghcr.io/${{ github.repository }}-gdskg
+
+      - name: Create Database Directories
+        run: |
+          mkdir -p ${{ github.workspace }}/graph_db
+          mkdir -p ${{ github.workspace }}/vector_db
+
+      - name: Run GDSKG Build
+        # UPDATE THIS: If you are targeting repositories OTHER than the one this action is running in,
+        # you will need a Personal Access Token (PAT) with read access to those repos.
+        # Uncomment the 'env:' block and configure the secret in your repository settings.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Change to ${{ secrets.MY_CUSTOM_PAT }} if needed
+        run: |
+          # UPDATE THIS: A space-separated list of GitHub repositories to index.
+          # e.g., "my-org/backend-repo my-org/frontend-repo"
+          # By default, it uses the current repository
+          REPOS="${{ github.repository }}" 
+          
+          # Optional: Include plugins (comma-separated). e.g., "--build-plugin GitHubPR"
+          BUILD_ARGS=""
+          
+          BASE_IMAGE="ghcr.io/gdskg/gdskg:latest"
+          
+          for REPO in $REPOS; do
+            echo "Indexing $REPO..."
+            # Formulate the correct repository URL, adding token conditionally
+            if [[ "$REPO" != http* ]]; then
+              if [ -n "$GITHUB_TOKEN" ]; then
+                TARGET_REPO="https://x-access-token:${GITHUB_TOKEN}@github.com/$REPO"
+              else
+                TARGET_REPO="https://github.com/$REPO"
+              fi
+            else
+              TARGET_REPO="$REPO"
+            fi
+            
+            docker run --rm \
+              -v ${{ github.workspace }}/graph_db:/app/graph_db \
+              -v ${{ github.workspace }}/vector_db:/app/vector_db \
+              $BASE_IMAGE \
+              build --repository "$TARGET_REPO" --graph /app/graph_db $BUILD_ARGS
+          done
+
+      - name: Create Custom Dockerfile
+        run: |
+          cat <<EOF > ${{ github.workspace }}/Dockerfile.custom
+          FROM ghcr.io/gdskg/gdskg:latest
+          
+          COPY graph_db/ /app/graph_db/
+          COPY vector_db/ /app/vector_db/
+          
+          RUN chown -R root:root /app/vector_db /app/graph_db
+          EOF
+
+      - name: Build Custom Image
+        run: |
+          docker build -t ${{ steps.meta.outputs.tags }} -f ${{ github.workspace }}/Dockerfile.custom ${{ github.workspace }}
+
+      - name: Push Image to GHCR
+        run: |
+          docker push ${{ steps.meta.outputs.tags }}

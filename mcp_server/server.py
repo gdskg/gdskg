@@ -36,7 +36,7 @@ def get_project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 PROJECT_ROOT = get_project_root()
-DEFAULT_GRAPH_PATH = PROJECT_ROOT / "gdskg_graph"
+DEFAULT_GRAPH_PATH = Path(os.environ.get("GDSKG_GRAPH_DB_DIR", Path.home() / ".gdskg" / "graph_db"))
 
 # Ensure potential import paths are available
 sys.path.append(str(PROJECT_ROOT))
@@ -79,44 +79,8 @@ def _write_server_status(started: bool) -> None:
     _STATUS_FILE.write_text("started" if started else "stopped")
 
 @mcp.tool()
-def start_server() -> str:
-    """
-    Start the GDSKG server.
-
-    Returns:
-        str: Confirmation message.
-    """
-    _write_server_status(True)
-    return "Server started. Ready to handle requests."
-
-@mcp.tool()
-def stop_server() -> str:
-    """
-    Stop the GDSKG server.
-
-    Returns:
-        str: Confirmation message.
-    """
-    _write_server_status(False)
-    return "Server stopped."
-
-@mcp.tool()
-def get_server_status() -> str:
-    """
-    Get the current status of the GDSKG server.
-
-    Returns:
-        str: A message describing the current status.
-    """
-    started = _read_server_status()
-    return f"Server is {'started' if started else 'stopped'}."
-
-_write_server_status(True)
-
-@mcp.tool()
 def query_knowledge_graph(
     query: str,
-    graph_path: str = str(DEFAULT_GRAPH_PATH),
     limit: int = 10,
     depth: int = 2,
     traverse_types: Optional[List[str]] = None,
@@ -133,7 +97,6 @@ def query_knowledge_graph(
 
     Args:
         query (str): The search query.
-        graph_path (str, optional): The path to the graph directory. Defaults to DEFAULT_GRAPH_PATH.
         limit (int, optional): The maximum number of results to display. Defaults to 10.
         depth (int, optional): The traversal depth for connected nodes. Defaults to 2.
         traverse_types (List[str], optional): Node types to follow during traversal. Defaults to None.
@@ -151,7 +114,7 @@ def query_knowledge_graph(
     if not _read_server_status():
         return "Server is stopped. Please start the server first."
 
-    db_path = Path(graph_path) / "gdskg.db"
+    db_path = DEFAULT_GRAPH_PATH / "gdskg.db"
     if not db_path.exists():
         return f"Warning: Knowledge Graph Database not found at '{db_path}'. Use `index_repository` first."
 
@@ -218,7 +181,11 @@ def _format_query_results(query: str, results: List[Dict], limit: int) -> str:
                 grouped[info['type']].append(node_id)
             
             for ntype, nodes in grouped.items():
-                display = [Path(n).name if ntype == NodeType.FILE.value else n for n in nodes]
+                if ntype in (NodeType.FILE.value, NodeType.FUNCTION.value, NodeType.FUNCTION_VERSION.value):
+                    display = [f"{Path(n).name if ntype == NodeType.FILE.value else n} [AST Node ID: {n}]" for n in nodes]
+                else:
+                    display = [Path(n).name if ntype == NodeType.FILE.value else n for n in nodes]
+                
                 if ntype == NodeType.KEYWORD.value:
                     output += f"     - {ntype}: {', '.join(display[:3])}"
                     if len(display) > 3: output += f" (+{len(display)-3} more)"
@@ -231,7 +198,6 @@ def _format_query_results(query: str, results: List[Dict], limit: int) -> str:
 @mcp.tool()
 def index_repository(
     repository: str, 
-    graph_path: str = str(DEFAULT_GRAPH_PATH), 
     overwrite: bool = False,
     plugins: list[str] = None,
     parameters: list[str] = None,
@@ -242,7 +208,6 @@ def index_repository(
 
     Args:
         repository (str): The URL or local path to the repository.
-        graph_path (str, optional): The path to the graph directory. Defaults to DEFAULT_GRAPH_PATH.
         overwrite (bool, optional): If True, overwrite the existing database. Defaults to False.
         plugins (List[str], optional): Plugins to run during indexing. Defaults to None.
         parameters (List[str], optional): Plugin-specific parameters. Defaults to None.
@@ -256,7 +221,7 @@ def index_repository(
 
     try:
         repo_path = _prepare_repo(repository)
-        db_path = _prepare_db(graph_path, overwrite)
+        db_path = _prepare_db(str(DEFAULT_GRAPH_PATH), overwrite)
         
         store = GraphStore(db_path)
         loaded_plugins = _load_and_validate_plugins(plugins)
@@ -369,7 +334,6 @@ def _parse_plugin_params(params: Optional[List[str]]) -> Dict[str, Dict[str, str
 @mcp.tool()
 def get_function_history(
     function_name: str,
-    graph_path: str = str(DEFAULT_GRAPH_PATH),
     plugins: Optional[List[str]] = None,
     parameters: Optional[List[str]] = None,
 ) -> str:
@@ -378,7 +342,6 @@ def get_function_history(
 
     Args:
         function_name (str): The name of the function.
-        graph_path (str, optional): Path to the graph directory. Defaults to DEFAULT_GRAPH_PATH.
         plugins (List[str], optional): Runtime plugins to execute. Defaults to None.
         parameters (List[str], optional): Plugin-specific parameters. Defaults to None.
 
@@ -387,13 +350,14 @@ def get_function_history(
     """
     if not _read_server_status(): return "Server stopped."
     
-    db_path = Path(graph_path) / "gdskg.db"
+    db_path = DEFAULT_GRAPH_PATH / "gdskg.db"
     if not db_path.exists(): return "Index repo first."
 
     try:
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
-            func_id = _find_best_function_match(cursor, function_name)
+            func_id, error_msg = _find_best_function_match(cursor, function_name)
+            if error_msg: return error_msg
             if not func_id: return f"No function matching '{function_name}'."
             
             history_rows = cursor.execute("SELECT target_id FROM edges WHERE source_id=? AND type='HAS_HISTORY'", (func_id,)).fetchall()
@@ -406,23 +370,38 @@ def get_function_history(
     except Exception as e:
         return f"Error: {str(e)}"
 
-def _find_best_function_match(cursor, name: str) -> Optional[str]:
+def _find_best_function_match(cursor, name: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    Find the best matching function node ID for a given name.
+    Find the best matching function node ID for a given name. Returns a tuple of (node_id, error_message).
+    If multiple matches are found, returns an error message with options.
 
     Args:
         cursor (sqlite3.Cursor): The graph database cursor.
         name (str): The function name or partial ID.
 
     Returns:
-        Optional[str]: The best matching node ID, or None if no match found.
+        Tuple[Optional[str], Optional[str]]: The matched node ID or an error message.
     """
     cursor.execute("SELECT id FROM nodes WHERE type IN ('FUNCTION', 'SYMBOL') AND id LIKE ?", (f"%{name}%",))
     matches = [m[0] for m in cursor.fetchall()]
-    if not matches: return None
+    if not matches: return None, f"No function matching '{name}'. Please check spelling or query for AST node IDs in broader searches."
     
     exact = [m for m in matches if m.endswith(name)]
-    return min(exact if exact else matches, key=len)
+    if exact and len(exact) == 1:
+        return exact[0], None
+
+    if len(matches) == 1:
+        return matches[0], None
+
+    options = exact if exact else matches
+    msg = f"Multiple matches found for '{name}'. Did you mean:\n"
+    for i, opt in enumerate(options[:10]):
+        msg += f"[{i+1}] {opt}\n"
+    if len(options) > 10:
+        msg += f"... and {len(options) - 10} more matches.\n"
+    msg += "Please query again using one of the exact function IDs above."
+    
+    return None, msg
 
 def _format_history_instance(cursor: sqlite3.Cursor, history_id: str, db_path: str, plugins: Optional[List[str]], params: Optional[List[str]]) -> str:
     """
@@ -513,3 +492,56 @@ if __name__ == "__main__":
     print("Starting GDSKG MCP Server", file=sys.stderr)
     uvicorn.run(app, host="0.0.0.0", port=8015, log_level="info")
 
+@mcp.tool()
+def get_ast_nodes(
+    node_id: str,
+    max_depth: int = 0,
+    query: Optional[str] = None
+) -> str:
+    """
+    Retrieve the AST nodes linked to a given FILE or FUNCTION_VERSION node.
+    
+    Args:
+        node_id (str): The ID of the file or function version.
+        max_depth (int, optional): Maximum depth to traverse the AST (0 for infinite).
+        query (str, optional): Optional semantic query to filter AST nodes by similarity.
+        
+    Returns:
+        str: A formatted string of the AST nodes found.
+    """
+    if not _read_server_status():
+        return "Server is stopped. Please start the server first."
+
+    db_path = DEFAULT_GRAPH_PATH / "gdskg.db"
+    if not db_path.exists():
+        return f"Warning: Knowledge Graph Database not found at '{db_path}'. Use `index_repository` first."
+
+    try:
+        from analysis.search_engine import SearchEngine
+        searcher = SearchEngine(str(db_path))
+        
+        try:
+            nodes = searcher.get_ast_nodes(node_id, max_depth, query=query)
+        except ValueError as ve:
+            return f"Error: {ve}"
+        except Exception as e:
+            return f"Error querying graph: {str(e)}"
+            
+        if not nodes:
+            return f"No AST nodes found linked from {node_id}."
+
+        output = f"Found {len(nodes)} AST nodes linked from {node_id}"
+        if query:
+            output += f" matching '{query}'"
+        output += ":\n\n"
+
+        for node in nodes:
+            safe_text = node['attributes'].get('text', '').replace('\n', ' ')
+            if safe_text:
+                safe_text = f" -> '{safe_text}'"
+            sim_str = f" [score: {node.get('similarity', 0):.2f}]" if query else ""
+            output += f" - {node['id']} ({node['attributes'].get('ast_type', 'unknown')}){safe_text}{sim_str}\n"
+
+        return output
+    except Exception as e:
+        return f"Error querying graph: {str(e)}"

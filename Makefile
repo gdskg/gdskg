@@ -15,7 +15,7 @@ else
     UNAME_S := $(shell uname -s)
 endif
 
-.PHONY: all clean venv install build
+.PHONY: all clean venv install build docker-build docker-run docker-clean
 
 all: build
 
@@ -62,3 +62,9 @@ docker-run:
 		-e GITHUB_PAT \
 		gdskg:latest
 	@echo "Server is running in background. Logs available via 'docker logs -f gdskg-server'"
+
+docker-clean:
+	@echo "Stopping and removing GDSKG container..."
+	@docker stop gdskg-server >/dev/null 2>&1 || true
+	@docker rm gdskg-server >/dev/null 2>&1 || true
+	@echo "Container gdskg-server removed."

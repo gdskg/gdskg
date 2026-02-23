@@ -111,7 +111,7 @@ class GraphExtractor:
             Node: The upserted repository node object.
         """
         repo_node = Node(
-            id=str(self.repo_path),
+            id=self.repo_path.name,
             type=NodeType.REPOSITORY,
             attributes={
                 "name": self.repo_path.name,

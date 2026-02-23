@@ -25,10 +25,12 @@ COPY VERSION .
 # Define environment variables
 ENV PYTHONUNBUFFERED=1
 ENV GDSKG_VECTOR_DB_DIR=/app/vector_db
+ENV GDSKG_GRAPH_DB_DIR=/app/graph_db
+ENV HF_HUB_DISABLE_PROGRESS_BARS=1
 
-# Create vector DB directory and define as volume
-RUN mkdir -p /app/vector_db
-VOLUME ["/app/vector_db"]
+# Create DB directories and define as volumes
+RUN mkdir -p /app/vector_db /app/graph_db
+VOLUME ["/app/vector_db", "/app/graph_db"]
 
 ENV GIT_PYTHON_GIT_EXECUTABLE=/usr/bin/git
 ENV GIT_PYTHON_REFRESH=quiet
