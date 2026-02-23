@@ -53,10 +53,10 @@ docker run -p 8015:8015 -v $(pwd)/vector_db:/app/vector_db ghcr.io/gdskg/gdskg:l
 ### 2. Connect Your AI
 Point your MCP-compatible client to `http://localhost:8015/mcp` (or hook up the Stdio transport). Your AI assistant will instantly gain access to specialized tools:
 - `index_repository`: AI can dynamically clone and parse public/private repos.
-- `query_knowledge_graph`: AI can search contexts, trace logic paths, and uncover architecture.
+- `query_knowledge_graph`: AI can search contexts, trace logic paths, and uncover architecture. Includes rich metadata for related nodes.
 - `get_function_history`: AI can pull the exact historical transformation of any function block.
-- `get_ast_nodes`: AI can retrieve the deep Abstract Syntax Tree linked directly to an active file or function version in the current HEAD.
-- `get_dependencies`: AI can discover what a node (file, function, symbol) uses and what uses it, with human-readable names and node types for all relationships.
+- `get_ast_nodes`: AI can retrieve the deep Abstract Syntax Tree linked directly to an active file or function version. Supports **semantic filtering** via the `query` parameter.
+- `get_dependencies`: AI can discover what a node (file, function, symbol) uses and what uses it. Supports **fuzzy path resolution** (e.g., just passing "Auth.tsx" matches the full internal path).
 
 ### 3. Ask Questions
 Just ask your AI: *"Index the repository at `https://github.com/gdskg/gdskg` and then explain how the semantic search system evolved over the last year. Give me specific commits and related files."*
@@ -71,58 +71,7 @@ If you want to pre-compute the knowledge graph for your repositories and bake it
 
 Create a `.github/workflows/gdskg.yml` file in your repository:
 
-```yaml
-name: Build Custom GDSKG Image
-on:
-  schedule:
-    - cron: '0 0 * * *' # Recommended: Run daily at midnight
-  workflow_dispatch: # Allows manual triggering
-  push:
-    branches:
-      - main
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Run GDSKG Build
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Or custom PAT
-        run: |
-          mkdir -p graph_db vector_db
-          
-          if [ -n "$GITHUB_TOKEN" ]; then
-            TARGET_REPO="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}"
-          else
-            TARGET_REPO="https://github.com/${{ github.repository }}"
-          fi
-          
-          docker run --rm \
-            -v $(pwd)/graph_db:/app/graph_db -v $(pwd)/vector_db:/app/vector_db \
-            ghcr.io/gdskg/gdskg:latest build --repository "$TARGET_REPO" --graph /app/graph_db
-      
-      - name: Build custom image
-        run: |
-          cat <<EOF > Dockerfile.custom
-          FROM ghcr.io/gdskg/gdskg:latest
-          COPY graph_db/ /app/graph_db/
-          COPY vector_db/ /app/vector_db/
-          RUN chown -R root:root /app/vector_db /app/graph_db
-          EOF
-          docker build -t ghcr.io/${{ github.repository }}-gdskg:latest -f Dockerfile.custom .
-          docker push ghcr.io/${{ github.repository }}-gdskg:latest
-```
-
-This will automatically build a specialized `gdskg` image that contains your repository's full knowledge graph!
+The template is found in [gdskg/examples/github-workflow.yml](examples/github-workflow.yml)
 
 ---
 
@@ -180,8 +129,24 @@ python main.py history "calculate_total" -G ./graph_output
 # View the full AST structure of a specific file or function node
 python main.py ast "analysis/search_engine.py" -G ./graph_output --depth 3
 
+# Semantic filtering within the AST (find 'query' logic inside the file)
+python main.py ast "analysis/search_engine.py" -G ./graph_output --query "parse query"
+
 # Explore dependencies and dependents for a specific node (fuzzy matching supported)
 python main.py dependencies "SearchEngine" -G ./graph_output
+
+### 3. Administrative Commands
+Manage the local environment and the server lifecycle.
+
+```bash
+# Pre-download semantic search models (recommended before first run)
+python main.py prepare
+
+# Start the MCP server manually (Stdio transport)
+python main.py serve --transport stdio --graph ./graph_output
+
+# Start the MCP server manually (SSE transport on port 8015)
+python main.py serve --transport sse --port 8015
 ```
 
 ---

@@ -65,9 +65,10 @@ def test_query_knowledge_graph(test_dirs):
     
     # Let's query for "python"
     result_python = query_knowledge_graph("python")
-    assert "Search Results for: 'python'" in result_python
+    assert "description" in result_python
+    assert "Search Results for: 'python'" in result_python["description"]
     # Assert we found something
-    assert "Commit:" in result_python
+    assert "Commit:" in result_python["description"]
 
 def test_query_no_results(test_dirs):
     repo_path, graph_path = test_dirs
@@ -75,13 +76,15 @@ def test_query_no_results(test_dirs):
     graph_path.mkdir(exist_ok=True)
     # If no db, query returns error
     result = query_knowledge_graph("missing")
-    assert "Warning: Knowledge Graph Database not found" in result
+    assert "warning" in result
+    assert "Knowledge Graph Database not found" in result["warning"]
 
     # Create empty db? No, index_repository handles creation. 
     # Let's index then query garbage.
     index_repository(str(repo_path), overwrite=True)
     result = query_knowledge_graph("supercalifragilisticexpialidocious_xyz")
-    assert "No relevant matches found" in result
+    assert "message" in result
+    assert "No relevant matches found" in result["message"]
 
 def test_index_with_plugins(test_dirs):
     repo_path, graph_path = test_dirs

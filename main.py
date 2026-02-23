@@ -197,6 +197,57 @@ def history(
     console.print(result)
 
 @app.command()
+def dependencies(
+    node_id: str = typer.Argument(..., help="The ID of the node to get dependencies for (supports fuzzy path matching)"),
+    graph: Path = typer.Option(..., "--graph", "-G", help="Directory where the knowledge graph is stored", exists=True, file_okay=False, dir_okay=True, resolve_path=True),
+):
+    """
+    Explore dependencies and dependents for a specific node (repo, file, function, symbol).
+    """
+    db_path = graph / "gdskg.db"
+    if not db_path.exists():
+        console.print(f"[bold red]Error[/bold red]: Database not found at {db_path}")
+        raise typer.Exit(code=1)
+
+    try:
+        searcher = SearchEngine(str(db_path))
+        result = searcher.get_dependencies(node_id)
+        
+        console.print(f"[bold green]Dependency Scan for:[/bold green] [cyan]{result['node']}[/cyan] ({result['type']})")
+        
+        # Dependencies (What it uses)
+        dep_table = Table(title="Dependencies (What it uses)", box=None, show_lines=False)
+        dep_table.add_column("Relationship", style="dim white")
+        dep_table.add_column("Target Node", style="blue")
+        dep_table.add_column("Type", style="dim")
+        
+        for dep in result['dependencies']:
+            dep_table.add_row(dep['type'], dep['name'], dep['node_type'])
+            
+        if result['dependencies']:
+            console.print(dep_table)
+        else:
+            console.print("[dim]No outgoing dependencies found.[/dim]")
+            
+        # Dependents (What uses it)
+        indep_table = Table(title="Dependents (What uses it)", box=None, show_lines=False)
+        indep_table.add_column("Relationship", style="dim white")
+        indep_table.add_column("Source Node", style="blue")
+        indep_table.add_column("Type", style="dim")
+        
+        for dep in result['dependents']:
+            indep_table.add_row(dep['type'], dep['name'], dep['node_type'])
+            
+        if result['dependents']:
+            console.print(indep_table)
+        else:
+            console.print("[dim]No incoming dependents found.[/dim]")
+            
+    except Exception as e:
+        console.print(f"[bold red]Error retrieving dependencies:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+@app.command()
 def prepare():
     """
     Pre-download external assets (models, etc.) needed for GDSKG.
