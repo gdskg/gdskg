@@ -3,7 +3,7 @@ import sqlite3
 import json
 import threading
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 from core.schema import Node, Edge, NodeType, EdgeType
 
 class GraphStore:
