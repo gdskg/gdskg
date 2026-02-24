@@ -259,6 +259,12 @@ class SearchEngine:
                 elif ntype == NodeType.FUNCTION.value:
                     cursor.execute("SELECT source_id FROM edges WHERE target_id = ? AND type = ?", (nid, EdgeType.MODIFIED_FUNCTION.value))
                     linked_commits = [r[0] for r in cursor.fetchall()]
+                elif ntype == NodeType.PULL_REQUEST.value:
+                    cursor.execute("SELECT source_id FROM edges WHERE target_id = ? AND type = ?", (nid, EdgeType.RELATED_TO_PR.value))
+                    linked_commits = [r[0] for r in cursor.fetchall()]
+                elif ntype == NodeType.CLICKUP_TASK.value:
+                    cursor.execute("SELECT source_id FROM edges WHERE target_id = ? AND type = ?", (nid, EdgeType.RELATED_TO_TASK.value))
+                    linked_commits = [r[0] for r in cursor.fetchall()]
                 elif ntype in [NodeType.COMMIT.value, NodeType.COMMIT_MESSAGE.value, "COMMIT_SYMBOLS"]:
                     linked_commits = [nid]
                     reason = f"Similar meaning identified in commit context (matched {ntype} score={sim:.2f})"
