@@ -21,6 +21,9 @@ class NodeType(str, Enum):
     COMMIT_MESSAGE = "COMMIT_MESSAGE"
     KEYWORD = "KEYWORD"
     COMMENT = "COMMENT"
+    AST_NODE = "AST_NODE"
+    PULL_REQUEST = "PULL_REQUEST"
+    CLICKUP_TASK = "CLICKUP_TASK"
 
 class EdgeType(str, Enum):
     """
@@ -46,6 +49,10 @@ class EdgeType(str, Enum):
     CREATED_VERSION = "CREATED_VERSION"
     COMMITTED_BY = "COMMITTED_BY"
     PARENT_OF = "PARENT_OF"
+    HAS_AST_NODE = "HAS_AST_NODE"
+    RELATED_TO_PR = "RELATED_TO_PR"
+    CURRENT_VERSION = "CURRENT_VERSION"
+    RELATED_TO_TASK = "RELATED_TO_TASK"
 
 @dataclass
 class Node:

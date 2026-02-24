@@ -183,8 +183,9 @@ class SearchEngine:
             cursor.execute("""
                 SELECT id, type, attributes FROM nodes 
                 WHERE id LIKE ? OR json_extract(attributes, '$.name') LIKE ? OR json_extract(attributes, '$.message') LIKE ? OR 
-                      json_extract(attributes, '$.content') LIKE ? OR json_extract(attributes, '$.author_name') LIKE ? OR json_extract(attributes, '$.author_email') LIKE ?
-            """, (f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%"))
+                      json_extract(attributes, '$.content') LIKE ? OR json_extract(attributes, '$.author_name') LIKE ? OR json_extract(attributes, '$.author_email') LIKE ? OR
+                      json_extract(attributes, '$.body') LIKE ? OR json_extract(attributes, '$.description') LIKE ?
+            """, (f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%"))
             
             for nid, ntype, n_attr_json in cursor.fetchall():
                 linked_commits = []
@@ -363,7 +364,7 @@ class SearchEngine:
             cursor.execute("SELECT target_id FROM edges WHERE source_id = ? AND type IN (?, ?, ?) UNION SELECT source_id FROM edges WHERE target_id = ? AND type IN (?, ?, ?)", 
                            (nid, EdgeType.HAS_SYMBOL.value, EdgeType.HAS_KEYWORD.value, EdgeType.MODIFIED_SYMBOL.value, nid, EdgeType.HAS_SYMBOL.value, EdgeType.HAS_KEYWORD.value, EdgeType.MODIFIED_SYMBOL.value))
             return any(ln in semantic_set or any(kw in ln.lower() for kw in keywords) for ln, in cursor.fetchall())
-        if ntype in [NodeType.COMMIT.value, NodeType.COMMIT_MESSAGE.value, NodeType.COMMENT.value, NodeType.SECRET.value, NodeType.FUNCTION.value]:
+        if ntype in [NodeType.COMMIT.value, NodeType.COMMIT_MESSAGE.value, NodeType.COMMENT.value, NodeType.SECRET.value, NodeType.FUNCTION.value, NodeType.PULL_REQUEST.value, NodeType.CLICKUP_TASK.value]:
             text = " ".join(str(v).lower() for v in attrs.values())
             return any(kw in text for kw in keywords)
         return True

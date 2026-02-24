@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import json
 import threading
@@ -25,6 +26,25 @@ class GraphStore:
         self._nodes_cache = {}
         self._edges_cache = {}
         self._lock = threading.Lock()
+        self._token_pattern = re.compile(r'(?:https?://|x-ac{1,2}ess-token:)[^@/ ]*@github\.com', re.IGNORECASE)
+
+    def _sanitize_attributes(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Recursively sanitize attributes to remove sensitive information like access tokens.
+        """
+        if not attributes:
+            return attributes
+            
+        def sanitize_value(val):
+            if isinstance(val, str):
+                return self._token_pattern.sub('x-access-token:*@github.com', val)
+            elif isinstance(val, list):
+                return [sanitize_value(v) for v in val]
+            elif isinstance(val, dict):
+                return {k: sanitize_value(v) for k, v in val.items()}
+            return val
+
+        return sanitize_value(attributes)
 
     def _init_db(self) -> None:
         """
@@ -80,6 +100,10 @@ class GraphStore:
             None
         """
         with self._lock:
+            # Sanitize attributes before caching
+            if node.attributes:
+                node.attributes = self._sanitize_attributes(node.attributes)
+                
             if node.id in self._nodes_cache:
                 existing = self._nodes_cache[node.id]
                 if node.attributes:
@@ -118,6 +142,10 @@ class GraphStore:
             None
         """
         with self._lock:
+            # Sanitize attributes before caching
+            if edge.attributes:
+                edge.attributes = self._sanitize_attributes(edge.attributes)
+                
             if edge.id in self._edges_cache:
                 existing = self._edges_cache[edge.id]
                 if edge.attributes:

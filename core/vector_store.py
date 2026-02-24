@@ -172,6 +172,8 @@ class VectorStore:
             self._extract_symbols(cursor, nodes_to_embed)
             self._extract_latest_function_versions(cursor, nodes_to_embed)
             self._extract_commits_and_symbols(cursor, nodes_to_embed)
+            self._extract_pull_requests(cursor, nodes_to_embed)
+            self._extract_clickup_tasks(cursor, nodes_to_embed)
 
         return self._batch_embed_and_store(nodes_to_embed, embedder, progress_callback)
 
@@ -275,6 +277,38 @@ class VectorStore:
             if commit_symbols:
                 all_symbols_text = " ".join(commit_symbols)
                 nodes_to_embed.append((c_id, "COMMIT_SYMBOLS", all_symbols_text))
+
+    def _extract_pull_requests(self, cursor: sqlite3.Cursor, nodes_to_embed: list) -> None:
+        """
+        Extract Pull Request titles and descriptions for semantic indexing.
+        """
+        cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.PULL_REQUEST.value,))
+        for pr_id, attr_json in cursor.fetchall():
+            try:
+                attrs = json.loads(attr_json)
+                title = attrs.get('title', '')
+                body = attrs.get('body', '')
+                content = f"{title}\n{body}".strip()
+                if content:
+                    nodes_to_embed.append((pr_id, NodeType.PULL_REQUEST.value, content))
+            except Exception:
+                pass
+
+    def _extract_clickup_tasks(self, cursor: sqlite3.Cursor, nodes_to_embed: list) -> None:
+        """
+        Extract ClickUp task titles and descriptions for semantic indexing.
+        """
+        cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.CLICKUP_TASK.value,))
+        for task_id, attr_json in cursor.fetchall():
+            try:
+                attrs = json.loads(attr_json)
+                title = attrs.get('title', '')
+                description = attrs.get('description', '')
+                content = f"{title}\n{description}".strip()
+                if content:
+                    nodes_to_embed.append((task_id, NodeType.CLICKUP_TASK.value, content))
+            except Exception:
+                pass
 
     def _batch_embed_and_store(self, nodes_to_embed: list, embedder, progress_callback) -> int:
         """

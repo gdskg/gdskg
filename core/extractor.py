@@ -116,7 +116,7 @@ class GraphExtractor:
             attributes={
                 "name": self.repo_path.name,
                 "root_path": str(self.repo_path.resolve()),
-                "remotes": [r.url for r in self.repo.remotes]
+                "remotes": [re.sub(r'x-ac{1,2}ess-token:.*?@github\.com', 'x-access-token:*@github.com', r.url) for r in self.repo.remotes]
             }
         )
         self.store.upsert_node(repo_node)
