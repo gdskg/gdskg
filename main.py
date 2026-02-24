@@ -56,18 +56,25 @@ def build(
     """
     console.print(f"[bold green]Starting GDSKG Build[/bold green]")
     
-    repo_path = _prepare_repository(repository)
-    console.print(f"Repository Path: [blue]{repo_path}[/blue]")
-    console.print(f"Graph Output: [blue]{graph}[/blue]")
+    # Handle multiple repositories (comma-separated)
+    repos = [r.strip() for r in repository.split(",")]
     
-    _validate_git_repo(repo_path)
     db_path = _prepare_database_path(graph, overwrite)
-    
     store = GraphStore(db_path)
     loaded_plugins = _load_plugins(plugins)
     plugin_config = _parse_plugin_parameters(parameters)
-
-    _run_build_process(repo_path, store, loaded_plugins, plugin_config, include_bots, db_path)
+    
+    for repo_url in repos:
+        console.print(f"[bold cyan]Processing Repository:[/bold cyan] [blue]{repo_url}[/blue]")
+        repo_path = _prepare_repository(repo_url)
+        _validate_git_repo(repo_path)
+        
+        _run_build_process(repo_path, store, loaded_plugins, plugin_config, include_bots, db_path, finalize=False)
+    
+    # Manual finalize since we skipped it in the loop
+    store.finalize()
+    _run_semantic_indexing(db_path)
+    
     console.print("[yellow]Detailed analysis complete.[/yellow]")
 
 @app.command()
@@ -421,37 +428,40 @@ def _parse_plugin_parameters(parameters: Optional[List[str]]) -> Dict[str, Dict[
             console.print(f"[yellow]Warning: Error parsing parameter '{param}': {e}[/yellow]")
     return config
 
-def _run_build_process(repo_path: Path, store: GraphStore, plugins: List[Any], plugin_config: Dict, include_bots: bool, db_path: Path):
+def _run_build_process(repo_path: Path, store: GraphStore, plugins: List[Any], plugin_config: Dict, include_bots: bool, db_path: Path, progress: Optional[Progress] = None, finalize: bool = True):
     """
     Execute the core graph extraction and semantic indexing pipeline.
-
-    Args:
-        repo_path (Path): Path to the git repository.
-        store (GraphStore): Graph storage instance.
-        plugins (List[Any]): Loaded plugin instances.
-        plugin_config (Dict): Plugin configurations.
-        include_bots (bool): Whether to include bot commits.
-        db_path (Path): Path to the database file.
-
-    Returns:
-        None
     """
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), "•", TimeElapsedColumn(), "•", TimeRemainingColumn(), console=console, transient=True) as progress:
-        extractor = GraphExtractor(repo_path, store, plugins=plugins, plugin_config=plugin_config, progress=progress, skip_bots=not include_bots)
-        try:
-            extractor.process_repo()
-            console.print(f"[bold green]✓[/bold green] Graph built with [blue]{store.count_nodes()}[/blue] nodes.")
-            
+    if progress is None:
+        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), "•", TimeElapsedColumn(), "•", TimeRemainingColumn(), console=console, transient=True) as p:
+            _execute_extractor(repo_path, store, plugins, plugin_config, include_bots, db_path, p, finalize)
+    else:
+        _execute_extractor(repo_path, store, plugins, plugin_config, include_bots, db_path, progress, finalize)
+
+def _execute_extractor(repo_path, store, plugins, plugin_config, include_bots, db_path, progress, finalize):
+    extractor = GraphExtractor(repo_path, store, plugins=plugins, plugin_config=plugin_config, progress=progress, skip_bots=not include_bots)
+    try:
+        extractor.process_repo()
+        console.print(f"[bold green]✓[/bold green] [blue]{repo_path.name}[/blue] processed. Total nodes: [blue]{store.count_nodes()}[/blue].")
+        
+        if finalize:
             _run_semantic_indexing(db_path, progress)
-            
-        except Exception as e:
-            console.print(f"[bold red]✗ Build failed:[/bold red] {e}")
-            raise typer.Exit(code=1)
-        finally:
+    except Exception as e:
+        console.print(f"[bold red]✗ Build failed for {repo_path.name}:[/bold red] {e}")
+        raise typer.Exit(code=1)
+    finally:
+        if finalize:
             store.close()
 
-def _run_semantic_indexing(db_path: Path, progress: Progress):
+def _run_semantic_indexing(db_path: Path, progress: Optional[Progress] = None):
     """Generate and store semantic vector embeddings for the graph nodes."""
+    if progress is None:
+        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), "•", TimeElapsedColumn(), "•", TimeRemainingColumn(), console=console, transient=True) as p:
+            _execute_semantic_indexing(db_path, p)
+    else:
+        _execute_semantic_indexing(db_path, progress)
+
+def _execute_semantic_indexing(db_path, progress):
     t0 = time.time()
     task = progress.add_task("[cyan]Phase 4: Semantic indexing...[/cyan]", total=None)
     vstore = VectorStore()

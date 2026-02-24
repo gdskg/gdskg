@@ -95,9 +95,8 @@ class GitHubPlugin(PluginInterface):
         Returns:
             tuple[Optional[str], Optional[str]]: A tuple of (owner, repo), or (None, None) if parsing fails.
         """
-        # Remove .git suffix
-        if remote_url.endswith(".git"):
-            remote_url = remote_url[:-4]
+        # Remove trailing slashes and .git suffix
+        remote_url = remote_url.rstrip("/").replace(".git", "")
             
         pattern = r"github\.com[:/]([^/]+)/([^/]+)$"
         match = re.search(pattern, remote_url)
@@ -130,7 +129,7 @@ class GitHubPlugin(PluginInterface):
                 "Accept": "application/vnd.github.v3+json"
             }
             if self.pat:
-                headers["Authorization"] = f"token {self.pat}"
+                headers["Authorization"] = f"Bearer {self.pat}"
                 
             try:
                 response = requests.get(url, headers=headers)

@@ -71,9 +71,11 @@ jobs:
               TARGET_REPO="$REPO"
             fi
             
+            # Pass PAT to internal build engine
             docker run --rm \
               -v ${{ github.workspace }}/graph_db:/app/graph_db \
               -v ${{ github.workspace }}/vector_db:/app/vector_db \
+              -e GITHUB_TOKEN="$GITHUB_TOKEN" \
               $BASE_IMAGE \
               build --repository "$TARGET_REPO" --graph /app/graph_db $BUILD_ARGS
           done

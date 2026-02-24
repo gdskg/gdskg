@@ -249,15 +249,17 @@ def index_repository(
         return "Server is stopped."
 
     try:
-        repo_path = _prepare_repo(repository)
+        repos = [r.strip() for r in repository.split(",")]
         db_path = _prepare_db(str(DEFAULT_GRAPH_PATH), overwrite)
-        
         store = GraphStore(db_path)
         loaded_plugins = _load_and_validate_plugins(plugins)
         plugin_config = _parse_plugin_params(parameters)
         
-        extractor = GraphExtractor(repo_path, store, plugins=loaded_plugins, plugin_config=plugin_config, skip_bots=not include_bots)
-        extractor.process_repo()
+        for repo_url in repos:
+            repo_path = _prepare_repo(repo_url)
+            extractor = GraphExtractor(repo_path, store, plugins=loaded_plugins, plugin_config=plugin_config, skip_bots=not include_bots)
+            extractor.process_repo()
+            
         node_count = store.count_nodes()
         store.close()
         
@@ -266,7 +268,7 @@ def index_repository(
         embedded_count = vstore.build_from_graph(str(db_path), embedder)
         vstore.close()
         
-        msg = f"Successfully indexed '{repository}'. Graph built at {db_path}. {node_count} nodes, {embedded_count} embeddings."
+        msg = f"Successfully indexed {len(repos)} repositories. Graph built at {db_path}. {node_count} nodes, {embedded_count} embeddings."
         if loaded_plugins: msg += f" Plugins enabled: {len(loaded_plugins)}."
         return msg
     except Exception as e:
