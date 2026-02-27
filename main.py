@@ -94,7 +94,8 @@ def query(
     all_files: bool = typer.Option(False, "--all-files", help="Show all files edited in matching commits"),
     exclude: Optional[List[str]] = typer.Option(None, "--exclude", help="Commit IDs to exclude from results"),
     offset: int = typer.Option(0, "--offset", help="Number of results to skip"),
-    negative_query: str = typer.Option("", "--negative-query", help="Terms to avoid in search results")
+    negative_query: str = typer.Option("", "--negative-query", help="Terms to avoid in search results"),
+    exclude_type: Optional[List[str]] = typer.Option(None, "--exclude-type", help="Node types to exclude from traversal results")
 ):
     """
     Query the Git-Derived Software Knowledge Graph.
@@ -144,7 +145,8 @@ def query(
         all_files=all_files,
         excluded_commits=exclude,
         offset=offset,
-        negative_query=negative_query
+        negative_query=negative_query,
+        exclude_types=exclude_type
     )
 
     if plugins and results:
@@ -162,7 +164,8 @@ def query(
             all_files=all_files,
             excluded_commits=exclude,
             offset=offset,
-            negative_query=negative_query
+            negative_query=negative_query,
+            exclude_types=exclude_type
         )
 
     if not results:
@@ -567,7 +570,7 @@ def _build_result_detail_text(res: Dict, depth: int, show_matches: bool) -> Text
         Text: A Rich Text object containing the formatted detail.
     """
     detail = Text()
-    detail.append(f"{res['message'].split('\n')[0]}\n", style="bold white")
+    detail.append(f"{res['message']}\n", style="bold white")
     detail.append(f"Author: ", style="dim")
     detail.append(f"{res['author']}  ", style="green")
     detail.append(f"Date: ", style="dim")
@@ -611,14 +614,24 @@ def _append_connections_to_detail(detail: Text, connections: Dict):
         label = ntype.replace('_', ' ').title()
         detail.append(f"{label}: ", style=f"dim {color}")
         
-        if ntype == "PULL_REQUEST":
+        if ntype in ("PULL_REQUEST", NodeType.COMMENT.value, NodeType.COMMIT_MESSAGE.value, NodeType.CLICKUP_TASK.value):
             for node_id, attrs in nodes:
-                num = attrs.get('number', '?')
-                title = attrs.get('title', 'PR')
-                detail.append(f"#{num} {title}", style=color).append("\n")
-                if attrs.get('body'):
-                    for line in attrs['body'].split('\n'):
-                        detail.append(f"      {line}\n", style=color)
+                if ntype == "PULL_REQUEST":
+                    num = attrs.get('number', '?')
+                    title = attrs.get('title', 'PR')
+                    detail.append(f"#{num} {title}", style=color).append("\n")
+                    if attrs.get('body'):
+                        for line in attrs['body'].split('\n'):
+                            detail.append(f"      {line}\n", style=color)
+                elif ntype in (NodeType.COMMENT.value, NodeType.COMMIT_MESSAGE.value, NodeType.CLICKUP_TASK.value):
+                    content = attrs.get('content', attrs.get('description', node_id)).strip()
+                    # If it's multi-line, show it indented
+                    if '\n' in content:
+                        detail.append("\n")
+                        for line in content.split('\n'):
+                            detail.append(f"      {line}\n", style=color)
+                    else:
+                        detail.append(f"{content}\n", style=color)
         else:
             names = []
             for node_id, attrs in nodes:
@@ -694,6 +707,37 @@ def _run_sse_server(host: str, port: int):
     console.print(f"[bold green]Starting GDSKG MCP Server[/bold green]")
     console.print(f"URL: [blue]http://{host}:{port}/mcp[/blue]")
     uvicorn.run(app, host=host, port=port, log_level="info")
+
+@app.command()
+def types(
+    graph: Path = typer.Option(..., "--graph", "-G", help="Directory where the knowledge graph is stored", exists=True, file_okay=False, dir_okay=True, resolve_path=True)
+):
+    """
+    List all unique node types currently present in the knowledge graph.
+    """
+    db_path = graph / "gdskg.db"
+    if not db_path.exists():
+        console.print(f"[bold red]Error[/bold red]: Database not found at {db_path}")
+        raise typer.Exit(code=1)
+
+    try:
+        searcher = SearchEngine(str(db_path))
+        node_types = searcher.get_node_types()
+        
+        if not node_types:
+            console.print("[yellow]No nodes found in the graph.[/yellow]")
+            return
+
+        table = Table(title="Node Types in Graph", box=None)
+        table.add_column("Type", style="cyan")
+        
+        for ntype in node_types:
+            table.add_row(ntype)
+            
+        console.print(table)
+    except Exception as e:
+        console.print(f"[bold red]Error retrieving node types:[/bold red] {e}")
+        raise typer.Exit(code=1)
 
 if __name__ == "__main__":
     app()

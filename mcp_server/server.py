@@ -94,6 +94,7 @@ def query_knowledge_graph(
     excluded_commits: Optional[List[str]] = None,
     offset: int = 0,
     negative_query: str = "",
+    exclude_types: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Query the Git-Derived Software Knowledge Graph.
@@ -140,7 +141,8 @@ def query_knowledge_graph(
             filters=parsed_filters,
             excluded_commits=excluded_commits,
             offset=offset,
-            negative_query=negative_query
+            negative_query=negative_query,
+            exclude_types=exclude_types
         )
         
         if plugins and results:
@@ -156,7 +158,8 @@ def query_knowledge_graph(
                 top_n=top_n,
                 excluded_commits=excluded_commits,
                 offset=offset,
-                negative_query=negative_query
+                negative_query=negative_query,
+                exclude_types=exclude_types
             )
 
         if not results:
@@ -228,7 +231,7 @@ def _format_query_results(query: str, results: List[Dict], limit: int) -> str:
     output = f"Search Results for: '{query}'\n\n"
     for i, res in enumerate(results[:limit]):
         output += f"{i+1}. [Relevance: {res['relevance']:.2f}] Commit: {res['id'][:8]}\n"
-        output += f"   Message: {res['message'].split('\n')[0]}\n"
+        output += f"   Message: {res['message']}\n"
         output += f"   Author: {res['author']} | Date: {res['date'][:10]}\n"
         
         connections = res.get('connections', {})
@@ -236,13 +239,26 @@ def _format_query_results(query: str, results: List[Dict], limit: int) -> str:
             output += "   Related:\n"
             grouped = collections.defaultdict(list)
             for node_id, info in connections.items():
-                grouped[info['type']].append(node_id)
+                grouped[info['type']].append((node_id, info.get('attributes', {})))
             
             for ntype, nodes in grouped.items():
-                if ntype in (NodeType.FILE.value, NodeType.FUNCTION.value, NodeType.FUNCTION_VERSION.value):
-                    display = [f"{Path(n).name if ntype == NodeType.FILE.value else n} [AST Node ID: {n}]" for n in nodes]
-                else:
-                    display = [Path(n).name if ntype == NodeType.FILE.value else n for n in nodes]
+                display = []
+                for node_id, attrs in nodes:
+                    if ntype == NodeType.FILE.value:
+                        display.append(f"{Path(node_id).name} [AST Node ID: {node_id}]")
+                    elif ntype in (NodeType.FUNCTION.value, NodeType.FUNCTION_VERSION.value):
+                        display.append(f"{node_id} [AST Node ID: {node_id}]")
+                    elif ntype in (NodeType.COMMENT.value, NodeType.COMMIT_MESSAGE.value):
+                        display.append(attrs.get('content', node_id).strip())
+                    elif ntype == NodeType.PULL_REQUEST.value:
+                        num = attrs.get('number', '?')
+                        title = attrs.get('title', 'PR')
+                        display.append(f"PR #{num}: {title}")
+                    elif ntype == NodeType.CLICKUP_TASK.value:
+                        name = attrs.get('name', node_id)
+                        display.append(f"Task: {name}")
+                    else:
+                        display.append(node_id)
                 
                 if ntype == NodeType.KEYWORD.value:
                     output += f"     - {ntype}: {', '.join(display[:3])}"
@@ -534,7 +550,7 @@ def _generate_history_output(cursor: sqlite3.Cursor, ordered_vids: List[str], v_
         v = v_map[vid]
         cid = v.get('commit_id', 'Unknown')
         c_row = cursor.execute("SELECT attributes FROM nodes WHERE id=?", (cid,)).fetchone()
-        msg = json.loads(c_row[0]).get('message', '').split('\n')[0] if c_row else "Unknown"
+        msg = json.loads(c_row[0]).get('message', 'Unknown') if c_row else "Unknown"
         output += f"V{i+1} ({cid[:8]}): {msg}\n" + "-"*40 + f"\n{v.get('content', '')}\n\n"
     return output
 
@@ -633,3 +649,26 @@ def get_dependencies(
         return searcher.get_dependencies(node_id)
     except Exception as e:
         return {"error": f"Error retrieving dependencies: {str(e)}"}
+
+@mcp.tool()
+def list_node_types() -> Dict[str, Any]:
+    """
+    Retrieve all unique node types currently present in the knowledge graph.
+    
+    Returns:
+        Dict[str, Any]: A list of node types.
+    """
+    if not _read_server_status():
+        return {"error": "Server is stopped."}
+
+    db_path = DEFAULT_GRAPH_PATH / "gdskg.db"
+    if not db_path.exists():
+        return {"error": "Index repo first."}
+
+    try:
+        from analysis.search_engine import SearchEngine
+        searcher = SearchEngine(str(db_path))
+        types = searcher.get_node_types()
+        return {"node_types": types}
+    except Exception as e:
+        return {"error": f"Error retrieving node types: {str(e)}"}

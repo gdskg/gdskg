@@ -30,7 +30,7 @@ class SearchEngine:
             vector_dir.mkdir(parents=True, exist_ok=True)
             self.vector_db_path = str(vector_dir / "gdskg_vectors.db")
 
-    def search(self, query: str = "", repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5, filters: Dict[str, str] = None, all_matches: bool = False, all_files: bool = False, excluded_commits: List[str] = None, offset: int = 0, negative_query: str = "") -> List[Dict[str, Any]]:
+    def search(self, query: str = "", repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, exclude_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5, filters: Dict[str, str] = None, all_matches: bool = False, all_files: bool = False, excluded_commits: List[str] = None, offset: int = 0, negative_query: str = "") -> List[Dict[str, Any]]:
         """
         Query the knowledge graph using keyword and/or semantic search, applying filters and depth-based exploration.
 
@@ -64,6 +64,10 @@ class SearchEngine:
         allowed_types = {t.upper() for t in traverse_types} if traverse_types else set()
         if allowed_types:
             allowed_types.discard(NodeType.AST_NODE.value)
+
+        exclude_types = {t.upper().rstrip('S') for t in exclude_types} if exclude_types else set()
+        # Ensure we can still see commits if not explicitly excluding them, 
+        # but usually exclude_types is for traversal noise.
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -116,7 +120,7 @@ class SearchEngine:
             top_commits = sorted_commits[offset : offset + top_n]
 
             if depth > 0:
-                self._run_graph_traversal(cursor, top_commits, depth, keywords, semantic_relevance_set, allowed_types, all_matches, all_files, negative_keywords, negative_semantic_set)
+                self._run_graph_traversal(cursor, top_commits, depth, keywords, semantic_relevance_set, allowed_types, exclude_types, all_matches, all_files, negative_keywords, negative_semantic_set)
 
         return top_commits
 
@@ -351,7 +355,7 @@ class SearchEngine:
                     cdict["relevance"] /= (penalty)
                     cdict["reasons"].append(f"Penalized relevance (divided by {penalty:.2f}) for modifying {num_files} files")
 
-    def _run_graph_traversal(self, cursor: sqlite3.Cursor, top_commits: List[Dict], depth: int, keywords: List[str], semantic_set: Set[str], allowed_types: Set[str], all_matches: bool, all_files: bool, negative_keywords: List[str] = None, negative_semantic_set: Set[str] = None):
+    def _run_graph_traversal(self, cursor: sqlite3.Cursor, top_commits: List[Dict], depth: int, keywords: List[str], semantic_set: Set[str], allowed_types: Set[str], exclude_types: Set[str], all_matches: bool, all_files: bool, negative_keywords: List[str] = None, negative_semantic_set: Set[str] = None):
         """
         Perform breadth-first traversal from top results to gather connected context nodes.
 
@@ -396,6 +400,9 @@ class SearchEngine:
                     if negative_keywords or negative_semantic_set:
                         if self._is_node_avoided(cursor, nid, ntype, n_attrs, negative_keywords, negative_semantic_set):
                             continue
+
+                    if exclude_types and (ntype in exclude_types or ntype.replace('_', ' ') in exclude_types or ntype.replace('_', '') in exclude_types):
+                        continue
 
                     if not is_trigger:
                         cdict["connections"][nid] = {"type": ntype, "distance": dist + 1, "attributes": n_attrs}
@@ -765,3 +772,15 @@ class SearchEngine:
                 "dependencies": dependencies,
                 "dependents": dependents
             }
+
+    def get_node_types(self) -> List[str]:
+        """
+        Retrieve all unique node types currently present in the knowledge graph.
+        
+        Returns:
+            List[str]: A list of alphabetical node types.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT type FROM nodes ORDER BY type")
+            return [row[0] for row in cursor.fetchall()]
