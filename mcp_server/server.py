@@ -91,6 +91,9 @@ def query_knowledge_graph(
     plugins: Optional[List[str]] = None,
     parameters: Optional[List[str]] = None,
     filters: Optional[List[str]] = None,
+    excluded_commits: Optional[List[str]] = None,
+    offset: int = 0,
+    negative_query: str = "",
 ) -> Dict[str, Any]:
     """
     Query the Git-Derived Software Knowledge Graph.
@@ -107,6 +110,9 @@ def query_knowledge_graph(
         plugins (List[str], optional): Runtime plugins to execute. Defaults to None.
         parameters (List[str], optional): Plugin-specific parameters. Defaults to None.
         filters (List[str], optional): Metadata filters in 'Type:Value' format. Defaults to None.
+        excluded_commits (List[str], optional): List of commit IDs to ignore. Defaults to None.
+        offset (int, optional): The number of results to skip. Defaults to 0.
+        negative_query (str, optional): Terms or meanings to avoid in results. Defaults to "".
 
     Returns:
         Dict[str, Any]: A dictionary containing a human-readable summary and hydrated search results.
@@ -123,12 +129,35 @@ def query_knowledge_graph(
         parsed_filters = _parse_filters(filters)
         searcher = SearchEngine(str(db_path))
         
-        results = searcher.search(query, repo_name=repo_name, depth=depth, traverse_types=traverse_types, semantic_only=semantic_only, min_score=min_score, top_n=top_n, filters=parsed_filters)
+        results = searcher.search(
+            query, 
+            repo_name=repo_name, 
+            depth=depth, 
+            traverse_types=traverse_types, 
+            semantic_only=semantic_only, 
+            min_score=min_score, 
+            top_n=top_n, 
+            filters=parsed_filters,
+            excluded_commits=excluded_commits,
+            offset=offset,
+            negative_query=negative_query
+        )
         
         if plugins and results:
             commit_ids = [res['id'] for res in results[:limit]]
             run_runtime_plugins(str(db_path), commit_ids, plugins, parameters)
-            results = searcher.search(query, repo_name=repo_name, depth=depth, traverse_types=traverse_types, semantic_only=semantic_only, min_score=min_score, top_n=top_n)
+            results = searcher.search(
+                query, 
+                repo_name=repo_name, 
+                depth=depth, 
+                traverse_types=traverse_types, 
+                semantic_only=semantic_only, 
+                min_score=min_score, 
+                top_n=top_n,
+                excluded_commits=excluded_commits,
+                offset=offset,
+                negative_query=negative_query
+            )
 
         if not results:
             return {"message": "No relevant matches found.", "results": []}

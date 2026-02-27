@@ -30,7 +30,7 @@ class SearchEngine:
             vector_dir.mkdir(parents=True, exist_ok=True)
             self.vector_db_path = str(vector_dir / "gdskg_vectors.db")
 
-    def search(self, query: str = "", repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5, filters: Dict[str, str] = None, all_matches: bool = False, all_files: bool = False) -> List[Dict[str, Any]]:
+    def search(self, query: str = "", repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5, filters: Dict[str, str] = None, all_matches: bool = False, all_files: bool = False, excluded_commits: List[str] = None, offset: int = 0, negative_query: str = "") -> List[Dict[str, Any]]:
         """
         Query the knowledge graph using keyword and/or semantic search, applying filters and depth-based exploration.
 
@@ -45,13 +45,20 @@ class SearchEngine:
             filters (Dict[str, str], optional): Metadata filters in 'Type:Value' format. Defaults to None.
             all_matches (bool, optional): If True, include all traversal matches regardless of relevance. Defaults to False.
             all_files (bool, optional): If True, include all modified files in results. Defaults to False.
+            excluded_commits (List[str], optional): List of commit IDs to exclude from results. Defaults to None.
+            offset (int, optional): The number of results to skip for pagination. Defaults to 0.
+            negative_query (str, optional): Terms to avoid in keyword and semantic search. Defaults to "".
 
         Returns:
             List[Dict[str, Any]]: A list of dictionaries representing the most relevant commits and their context.
         """
-        query = query or ""
+        query = query.strip() if query else ""
         keywords = self._extract_keywords(query)
         commits = {}
+        
+        negative_keywords = []
+        if negative_query:
+            negative_keywords = self._extract_keywords(negative_query)
         
         # AST_NODE should not be traversed in a general semantic/keyword search
         allowed_types = {t.upper() for t in traverse_types} if traverse_types else set()
@@ -68,21 +75,48 @@ class SearchEngine:
             if filters and allowed_commits is None:
                 return []
 
-            if allowed_commits is not None and not keywords and not query:
+            if allowed_commits is not None and not query:
                 self._add_filter_only_matches(commits, allowed_commits, repo_ids, cursor, filters)
 
             search_keywords = [] if semantic_only else keywords
-            self._search_keywords(cursor, search_keywords, commits, repo_ids, allowed_commits)
+            if search_keywords:
+                self._search_keywords(cursor, search_keywords, commits, repo_ids, allowed_commits)
             
-            semantic_relevance_set = self._run_semantic_search(query, commits, cursor, repo_ids, allowed_commits)
+            if negative_keywords and not semantic_only:
+                self._search_keywords(cursor, negative_keywords, commits, repo_ids, allowed_commits, is_negative=True)
+
+            semantic_relevance_set = set()
+            if query:
+                semantic_relevance_set = self._run_semantic_search(query, commits, cursor, repo_ids, allowed_commits)
+            
+            negative_semantic_set = set()
+            if negative_query:
+                negative_semantic_set = self._run_semantic_search(negative_query, commits, cursor, repo_ids, allowed_commits, is_negative=True)
+
             self._apply_file_count_penalty(cursor, commits)
+
+            if excluded_commits:
+                # Support both full SHAs and short prefixes
+                to_delete = []
+                for cid in excluded_commits:
+                    if cid in commits:
+                        to_delete.append(cid)
+                    else:
+                        # Try prefix match
+                        for full_sha in commits.keys():
+                            if full_sha.startswith(cid):
+                                to_delete.append(full_sha)
+                
+                for key in set(to_delete):
+                    del commits[key]
 
             sorted_commits = [r for r in commits.values() if r["relevance"] >= min_score]
             sorted_commits.sort(key=lambda x: x["relevance"], reverse=True)
-            top_commits = sorted_commits[:top_n]
+            
+            top_commits = sorted_commits[offset : offset + top_n]
 
             if depth > 0:
-                self._run_graph_traversal(cursor, top_commits, depth, keywords, semantic_relevance_set, allowed_types, all_matches, all_files)
+                self._run_graph_traversal(cursor, top_commits, depth, keywords, semantic_relevance_set, allowed_types, all_matches, all_files, negative_keywords, negative_semantic_set)
 
         return top_commits
 
@@ -168,7 +202,7 @@ class SearchEngine:
                 commits[cid]["relevance"] += 5
                 commits[cid]["reasons"].append(f"Matched strict filters: {filters}")
 
-    def _search_keywords(self, cursor: sqlite3.Cursor, keywords: List[str], commits: Dict, repo_ids: Set[str], allowed_commits: Optional[Set[str]]):
+    def _search_keywords(self, cursor: sqlite3.Cursor, keywords: List[str], commits: Dict, repo_ids: Set[str], allowed_commits: Optional[Set[str]], is_negative: bool = False):
         """
         Execute keyword-based search against the graph and update relevance scores.
 
@@ -178,6 +212,7 @@ class SearchEngine:
             commits (Dict): The results dictionary to populate.
             repo_ids (Set[str]): The set of allowed repository IDs.
             allowed_commits (Set[str], optional): The set of allowed commit IDs from strict filters.
+            is_negative (bool): If True, matching nodes will penalize relevance instead of increasing it.
         """
         for kw in keywords:
             cursor.execute("""
@@ -205,6 +240,12 @@ class SearchEngine:
                 for cid in linked_commits:
                     if allowed_commits is not None and cid not in allowed_commits:
                         continue
+                    
+                    if is_negative:
+                        if cid in commits:
+                            del commits[cid]
+                        continue
+
                     self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
                     if cid in commits:
                         kw_count = commits[cid]["keyword_matches"].get(kw, 0)
@@ -217,7 +258,7 @@ class SearchEngine:
                         if ntype != NodeType.COMMIT.value:
                             commits[cid]["connections"][nid] = {"type": ntype, "distance": 0, "attributes": json.loads(n_attr_json) if n_attr_json else {}}
 
-    def _run_semantic_search(self, query: str, commits: Dict, cursor: sqlite3.Cursor, repo_ids: Set[str], allowed_commits: Optional[Set[str]]) -> Set[str]:
+    def _run_semantic_search(self, query: str, commits: Dict, cursor: sqlite3.Cursor, repo_ids: Set[str], allowed_commits: Optional[Set[str]], is_negative: bool = False) -> Set[str]:
         """
         Execute semantic search using vector embeddings and update relevance scores.
 
@@ -227,6 +268,7 @@ class SearchEngine:
             cursor (sqlite3.Cursor): The database cursor.
             repo_ids (Set[str]): The set of allowed repository IDs.
             allowed_commits (Set[str], optional): The set of allowed commit IDs from filters.
+            is_negative (bool): If True, similarity will be subtracted from relevance.
 
         Returns:
             Set[str]: A set of node IDs identified as semantically relevant.
@@ -247,7 +289,8 @@ class SearchEngine:
                 if sim >= 0.20:
                     semantic_relevance_set.add(nid)
 
-            for nid, ntype, sim in all_results[:20]:
+            candidates = all_results if is_negative else all_results[:20]
+            for nid, ntype, sim in candidates:
                 if sim < 0.20:
                     continue
                 
@@ -272,6 +315,14 @@ class SearchEngine:
                 for cid in linked_commits:
                     if allowed_commits is not None and cid not in allowed_commits:
                         continue
+                    
+                    if is_negative:
+                        if cid in commits:
+                            penalty = 200.0 * sim
+                            commits[cid]["relevance"] -= penalty
+                            commits[cid]["reasons"].append(f"Avoided concept identified (similarity={sim:.2f}, penalty={penalty:.2f})")
+                        continue
+
                     self._ensure_commit_in_results(commits, cid, None, repo_ids, cursor)
                     if cid in commits:
                         sem_count = commits[cid]["semantic_matches"]
@@ -300,7 +351,7 @@ class SearchEngine:
                     cdict["relevance"] /= (penalty)
                     cdict["reasons"].append(f"Penalized relevance (divided by {penalty:.2f}) for modifying {num_files} files")
 
-    def _run_graph_traversal(self, cursor: sqlite3.Cursor, top_commits: List[Dict], depth: int, keywords: List[str], semantic_set: Set[str], allowed_types: Set[str], all_matches: bool, all_files: bool):
+    def _run_graph_traversal(self, cursor: sqlite3.Cursor, top_commits: List[Dict], depth: int, keywords: List[str], semantic_set: Set[str], allowed_types: Set[str], all_matches: bool, all_files: bool, negative_keywords: List[str] = None, negative_semantic_set: Set[str] = None):
         """
         Perform breadth-first traversal from top results to gather connected context nodes.
 
@@ -313,7 +364,12 @@ class SearchEngine:
             allowed_types (Set[str]): Node types allowed to be added as context.
             all_matches (bool): If True, include all nodes encountered during traversal.
             all_files (bool): If True, include all modified files as context.
+            negative_keywords (List[str]): Keywords to avoid in connections.
+            negative_semantic_set (Set[str]): Semantic meanings to avoid in connections.
         """
+        negative_keywords = negative_keywords or []
+        negative_semantic_set = negative_semantic_set or set()
+
         for cdict in top_commits:
             cid = cdict["id"]
             queue, visited = [(cid, 0)], {cid}
@@ -334,9 +390,13 @@ class SearchEngine:
 
                     is_trigger = nid in cdict["connections"] and cdict["connections"][nid].get("distance", -1) == 0
                     if not all_matches and not is_trigger:
-                        if not self._is_node_relevant(cursor, nid, ntype, n_attrs, keywords, semantic_set, all_files):
+                        if not self._is_node_relevant(cursor, nid, ntype, n_attrs, keywords, semantic_set, all_files, negative_keywords, negative_semantic_set):
                             continue
                     
+                    if negative_keywords or negative_semantic_set:
+                        if self._is_node_avoided(cursor, nid, ntype, n_attrs, negative_keywords, negative_semantic_set):
+                            continue
+
                     if not is_trigger:
                         cdict["connections"][nid] = {"type": ntype, "distance": dist + 1, "attributes": n_attrs}
                     
@@ -346,7 +406,7 @@ class SearchEngine:
                         continue
                     queue.append((nid, dist + 1))
 
-    def _is_node_relevant(self, cursor: sqlite3.Cursor, nid: str, ntype: str, attrs: Dict, keywords: List[str], semantic_set: Set[str], all_files: bool) -> bool:
+    def _is_node_relevant(self, cursor: sqlite3.Cursor, nid: str, ntype: str, attrs: Dict, keywords: List[str], semantic_set: Set[str], all_files: bool, negative_keywords: List[str] = None, negative_semantic_set: Set[str] = None) -> bool:
         """
         Determine if a connected node is relevant enough to be included in the search results.
 
@@ -358,10 +418,16 @@ class SearchEngine:
             keywords (List[str]): The search keywords.
             semantic_set (Set[str]): The set of semantically relevant node IDs.
             all_files (bool): If True, any modified file node is considered relevant.
+            negative_keywords (List[str]): Excluded keywords.
+            negative_semantic_set (Set[str]): Excluded meanings.
 
         Returns:
             bool: True if the node should be included as context.
         """
+        if negative_keywords or negative_semantic_set:
+            if self._is_node_avoided(cursor, nid, ntype, attrs, negative_keywords, negative_semantic_set):
+                return False
+
         if nid in semantic_set: return True
         if ntype == NodeType.KEYWORD.value:
             return any(kw in nid.lower() or kw in str(attrs.get("name", "")).lower() for kw in keywords)
@@ -374,6 +440,18 @@ class SearchEngine:
             text = " ".join(str(v).lower() for v in attrs.values())
             return any(kw in text for kw in keywords)
         return True
+
+    def _is_node_avoided(self, cursor: sqlite3.Cursor, nid: str, ntype: str, attrs: Dict, negative_keywords: List[str], negative_semantic_set: Set[str]) -> bool:
+        """
+        Check if a node matches negative criteria and should be avoided.
+        """
+        if negative_semantic_set and nid in negative_semantic_set:
+            return True
+        if negative_keywords:
+            text = (str(nid) + " " + " ".join(str(v) for v in attrs.values())).lower()
+            if any(kw in text for kw in negative_keywords):
+                return True
+        return False
 
     def _ensure_commit_in_results(self, commits: Dict, commit_id: str, attr_json: Optional[str], repo_ids: Set[str], cursor: sqlite3.Cursor):
         """

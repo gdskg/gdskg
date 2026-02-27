@@ -71,8 +71,7 @@ def build(
         
         _run_build_process(repo_path, store, loaded_plugins, plugin_config, include_bots, db_path, finalize=False)
     
-    # Manual finalize since we skipped it in the loop
-    store.finalize()
+    store.close()
     _run_semantic_indexing(db_path)
     
     console.print("[yellow]Detailed analysis complete.[/yellow]")
@@ -92,7 +91,10 @@ def query(
     filters: Optional[List[str]] = typer.Option(None, "--filter", "-F", help="Filter results by node type and value"),
     show_matches: bool = typer.Option(False, "--show-matches", help="Show detailed explanations of matches"),
     all_matches: bool = typer.Option(False, "--all-matches", help="Do not filter deep traversal nodes"),
-    all_files: bool = typer.Option(False, "--all-files", help="Show all files edited in matching commits")
+    all_files: bool = typer.Option(False, "--all-files", help="Show all files edited in matching commits"),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help="Commit IDs to exclude from results"),
+    offset: int = typer.Option(0, "--offset", help="Number of results to skip"),
+    negative_query: str = typer.Option("", "--negative-query", help="Terms to avoid in search results")
 ):
     """
     Query the Git-Derived Software Knowledge Graph.
@@ -112,6 +114,9 @@ def query(
         show_matches (bool): Show detailed explanations of matches.
         all_matches (bool): Do not filter deep traversal nodes.
         all_files (bool): Show all files edited in matching commits.
+        exclude (List[str], optional): Commit IDs to exclude from results.
+        offset (int): Number of results to skip.
+        negative_query (str): Terms to avoid in search results.
 
     Returns:
         None
@@ -126,12 +131,39 @@ def query(
 
     parsed_filters = _parse_metadata_filters(filters)
     searcher = SearchEngine(str(db_path))
-    results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only, min_score=min_score, top_n=top_n, filters=parsed_filters, all_matches=all_matches, all_files=all_files)
+    results = searcher.search(
+        query_str, 
+        repo_name=repository, 
+        depth=depth, 
+        traverse_types=traverse, 
+        semantic_only=semantic_only, 
+        min_score=min_score, 
+        top_n=top_n, 
+        filters=parsed_filters, 
+        all_matches=all_matches, 
+        all_files=all_files,
+        excluded_commits=exclude,
+        offset=offset,
+        negative_query=negative_query
+    )
 
     if plugins and results:
         commit_ids = [res['id'] for res in results]
         run_runtime_plugins(str(db_path), commit_ids, plugins, parameters)
-        results = searcher.search(query_str, repo_name=repository, depth=depth, traverse_types=traverse, semantic_only=semantic_only, min_score=min_score, top_n=top_n, all_matches=all_matches, all_files=all_files)
+        results = searcher.search(
+            query_str, 
+            repo_name=repository, 
+            depth=depth, 
+            traverse_types=traverse, 
+            semantic_only=semantic_only, 
+            min_score=min_score, 
+            top_n=top_n, 
+            all_matches=all_matches, 
+            all_files=all_files,
+            excluded_commits=exclude,
+            offset=offset,
+            negative_query=negative_query
+        )
 
     if not results:
         console.print("[yellow]No relevant matches found.[/yellow]")
