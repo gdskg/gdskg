@@ -23,6 +23,116 @@ from analysis.secret_scanner import SecretScanner
 from analysis.keyword_extractor import KeywordExtractor
 from analysis.tree_sitter_utils import TreeSitterUtils
 from core.plugin_interfaces import PluginInterface, GraphInterface
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+
+def _parse_commit_batch(repo_path, shas):
+    """
+    Worker function to collect commit data.
+    """
+    if not shas:
+        return []
+
+    git_format = '^C^%H|~|%P|~|%aI|~|%an|~|%ae|~|%cI|~|%cn|~|%ce|~|%B^E^'
+    cmd = [
+        'git', '-C', str(repo_path), 'show', '--no-abbrev', '--raw', '-p', '-U0',
+        f'--format=format:{git_format}'
+    ] + shas
+
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, text=True, errors='replace', bufsize=1024*1024
+    )
+
+    batch_results = []
+    current_commit_data = None
+    current_diff = None
+    message_buffer = []
+    in_message = False
+
+    for line in process.stdout:
+        if line.startswith('^C^'):
+            if current_commit_data:
+                if current_diff is not None:
+                    current_diff['diff_lines'] = "".join(current_diff['diff_lines'])
+                    current_commit_data['diffs'].append(current_diff)
+                current_commit_data['meta']['message'] = "".join(message_buffer).strip()
+                batch_results.append(current_commit_data)
+
+            header_content = line[3:]
+            header_part, body_start = header_content.split('^E^', 1) if '^E^' in header_content else (header_content, "")
+            parts = header_part.split('|~|')
+            
+            sha = parts[0] if len(parts) > 0 else "unknown"
+            current_commit_data = {
+                'sha': sha,
+                'meta': {
+                    'hexsha': sha,
+                    'parents': parts[1].split() if len(parts) > 1 else [],
+                    'author_date': parts[2] if len(parts) > 2 else "",
+                    'author_name': parts[3] if len(parts) > 3 else "",
+                    'author_email': parts[4] if len(parts) > 4 else "",
+                    'committer_date': parts[5] if len(parts) > 5 else "",
+                    'committer_name': parts[6] if len(parts) > 6 else "",
+                    'committer_email': parts[7] if len(parts) > 7 else "",
+                },
+                'diffs': []
+            }
+            message_buffer = [body_start]
+            in_message = True
+            current_diff = None
+        
+        elif in_message:
+            if line.startswith(':'): 
+                in_message = False
+            else:
+                message_buffer.append(line)
+                continue
+
+        if line.startswith(':'):
+            if current_diff is not None:
+                current_diff['diff_lines'] = "".join(current_diff['diff_lines'])
+                current_commit_data['diffs'].append(current_diff)
+            
+            tab_split = line.strip().split('\t')
+            if not tab_split or len(tab_split) < 2:
+                current_diff = None
+                continue
+
+            meta_parts = tab_split[0].split()
+            if len(meta_parts) < 5:
+                current_diff = None
+                continue
+                
+            status = meta_parts[4]
+            b_hexsha = meta_parts[3]
+            a_path = tab_split[1]
+            
+            b_path = None
+            if len(tab_split) >= 3:
+                b_path = tab_split[2]
+            elif status[0] != 'D':
+                b_path = tab_split[1]
+
+            current_diff = {
+                'a_path': a_path,
+                'b_path': b_path,
+                'change_type': status,
+                'b_blob_hexsha': b_hexsha if b_hexsha != '0' * 40 else None,
+                'diff_lines': []
+            }
+        
+        elif current_diff is not None:
+            current_diff['diff_lines'].append(line)
+
+    if current_commit_data:
+        if current_diff is not None:
+            current_diff['diff_lines'] = "".join(current_diff['diff_lines'])
+            current_commit_data['diffs'].append(current_diff)
+        current_commit_data['meta']['message'] = "".join(message_buffer).strip()
+        batch_results.append(current_commit_data)
+
+    process.wait()
+    return batch_results
 
 os.environ.setdefault("GIT_PYTHON_GIT_EXECUTABLE", "/usr/bin/git")
 os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
@@ -116,13 +226,13 @@ class GraphExtractor:
             attributes={
                 "name": self.repo_path.name,
                 "root_path": str(self.repo_path.resolve()),
-                "remotes": [re.sub(r'x-ac{1,2}ess-token:.*?@github\.com', 'x-access-token:*@github.com', r.url) for r in self.repo.remotes]
+                "remotes": [r.url for r in self.repo.remotes]
             }
         )
         self.store.upsert_node(repo_node)
         return repo_node
 
-    def _phase1_parse_git_log(self) -> tuple:
+    def _phase1_parse_git_log(self, batch_size=100) -> tuple:
         """
         Execute git log and parse the output into commit order and metadata dictionaries.
 
@@ -133,43 +243,51 @@ class GraphExtractor:
         commit_order = []
         commit_meta = {}
 
-        total_commits = 0
         try:
-            total_commits = int(subprocess.check_output(['git', '-C', str(self.repo_path), 'rev-list', '--count', 'HEAD']).strip())
+            all_shas = subprocess.check_output(
+                ['git', '-C', str(self.repo_path), 'rev-list', '--topo-order', '--reverse', 'HEAD'],
+                text=True
+            ).strip().split('\n')
         except Exception:
-            total_commits = None
+            return [], {}
+
+        if not all_shas or all_shas == ['']:
+            return [], {}
 
         parse_task = None
         if self.progress:
-            parse_task = self.progress.add_task("[yellow]Phase 1: Parsing git log...[/yellow]", total=total_commits)
-        
-        log_process = subprocess.Popen(
-            ['git', '-C', str(self.repo_path), 'log', '--no-abbrev', '--raw', '-p', '-U0',
-             '--topo-order', '--reverse',
-             '--format=format:^C^%H|~|%P|~|%aI|~|%an|~|%ae|~|%cI|~|%cn|~|%ce|~|%B^E^'],
-            stdout=subprocess.PIPE, text=True, errors='replace', bufsize=1024*1024
-        )
-        
-        ctx = {'current_commit': None, 'current_diff': None, 'in_message': False, 
-               'message_buffer': [], 'skip_current': False, 'current_diffs': None, 'parse_task': parse_task}
+            parse_task = self.progress.add_task("[yellow]Phase 1: Parsing git log (Parallel)...[/yellow]", total=len(all_shas))
 
-        for line in log_process.stdout:
-            if line.startswith('^C^'):
-                self._handle_new_commit_header(line, commit_order, commit_meta, ctx)
-            elif ctx['in_message']:
-                self._handle_message_line(line, commit_meta, ctx)
-            elif ctx['skip_current']:
-                continue
-            elif line.startswith(':'):
-                self._handle_diff_header(line, ctx)
-            elif ctx['current_diff'] is not None:
-                ctx['current_diff']['diff_lines'].append(line)
-        
-        if not ctx['skip_current'] and ctx['current_commit'] and ctx['current_diff'] is not None:
-            ctx['current_diff']['diff_lines'] = "".join(ctx['current_diff']['diff_lines'])
-            ctx['current_diffs'].append(ctx['current_diff'])
+        chunks = [all_shas[i:i + batch_size] for i in range(0, len(all_shas), batch_size)]
+
+        with ProcessPoolExecutor() as executor:
+            worker_func = partial(_parse_commit_batch, self.repo_path)
             
-        log_process.wait()
+            for batch_result in executor.map(worker_func, chunks):
+                for commit in batch_result:
+                    sha = commit['sha']
+                    meta = commit['meta']
+                    
+                    if self.store.get_node(sha) is not None:
+                        if self.progress: self.progress.advance(parse_task)
+                        continue
+                    
+                    author_name = meta.get('author_name', '').lower()
+                    is_bot = any(x in author_name for x in ["[bot]", "dependabot", "greenkeeper"])
+                    if self.skip_bots and is_bot:
+                        if self.progress: self.progress.advance(parse_task)
+                        continue
+
+                    self.diff_cache[sha] = commit['diffs']
+
+                    commit_order.append(sha)
+                    
+                    meta['diffs'] = commit['diffs']
+                    commit_meta[sha] = meta
+                    
+                    if self.progress:
+                        self.progress.advance(parse_task)
+
         return commit_order, commit_meta
 
     def _handle_new_commit_header(self, line: str, commit_order: list, commit_meta: dict, ctx: dict):
