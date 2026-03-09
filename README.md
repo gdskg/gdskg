@@ -57,6 +57,8 @@ Point your MCP-compatible client to `http://localhost:8015/mcp` (or hook up the 
 - `get_function_history`: AI can pull the exact historical transformation of any function block.
 - `get_ast_nodes`: AI can retrieve the deep Abstract Syntax Tree linked directly to an active file or function version. Supports **semantic filtering** via the `query` parameter.
 - `get_dependencies`: AI can discover what a node (file, function, symbol) uses and what uses it. Supports **fuzzy path resolution** (e.g., just passing "Auth.tsx" matches the full internal path).
+- `list_node_types` / `list_edge_types`: AI can dynamically query available entity and relationship schema definitions.
+- `amend_graph`: AI can actively update or correct the knowledge graph (using `add_node`, `update_edge`, etc.), producing a replayable changelog in the process.
 
 ### 3. Ask Questions
 Just ask your AI: *"Index the repository at `https://github.com/gdskg/gdskg` and then explain how the semantic search system evolved over the last year. Give me specific commits and related files."*
@@ -111,6 +113,11 @@ python main.py build \
   --repository /path/to/local/project \
   --graph ./graph_output \
   --overwrite
+```
+
+*Note: GDSKG also natively supports PostgreSQL! Set the `GDSKG_DB_URL` environment variable to a valid Postgres connection string (requires `pgvector` to be installed on the database instance).*
+```bash
+export GDSKG_DB_URL="postgresql://user:password@localhost:5432/gdskg"
 ```
 
 ### 2. Query for Insights

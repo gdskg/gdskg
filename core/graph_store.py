@@ -2,25 +2,43 @@ import re
 import sqlite3
 import json
 import threading
+import os
+import time
+import uuid
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 from core.schema import Node, Edge, NodeType, EdgeType
+
+try:
+    import psycopg2
+    from psycopg2.extras import Json
+except ImportError:
+    psycopg2 = None
 
 class GraphStore:
     """Persistent storage for the knowledge graph using SQLite."""
 
     def __init__(self, db_path: Path):
         """
-        Initialize the GraphStore with the specified SQLite database path.
+        Initialize the GraphStore with the specified database (PostgreSQL if env var set, else SQLite).
 
         Args:
-            db_path (Path): Path to the SQLite database file.
+            db_path (Path): Path to the SQLite database file (fallback).
         """
         self.db_path = db_path
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self.conn.execute("PRAGMA synchronous=OFF;")
-        self.conn.execute("PRAGMA cache_size=-64000;")
+        self.db_url = os.environ.get("GDSKG_DB_URL")
+        self.is_postgres = bool(self.db_url)
+        
+        if self.is_postgres:
+            if psycopg2 is None:
+                raise ImportError("psycopg2-binary is required for PostgreSQL support. Install it with pip install psycopg2-binary.")
+            self.conn = psycopg2.connect(self.db_url)
+        else:
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.conn.execute("PRAGMA journal_mode=WAL;")
+            self.conn.execute("PRAGMA synchronous=OFF;")
+            self.conn.execute("PRAGMA cache_size=-64000;")
+            
         self._init_db()
 
         self._nodes_cache = {}
@@ -48,31 +66,44 @@ class GraphStore:
 
     def _init_db(self) -> None:
         """
-        Initialize the SQLite database schema.
+        Initialize the database schema (SQLite or PostgreSQL).
 
         Returns:
             None
         """
         cursor = self.conn.cursor()
         
-        cursor.execute("""
+        json_type = "JSONB" if self.is_postgres else "JSON"
+        
+        cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS nodes (
                 id TEXT PRIMARY KEY,
                 type TEXT NOT NULL,
-                attributes JSON
+                attributes {json_type}
             )
         """)
         
-        cursor.execute("""
+        cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS edges (
                 id TEXT PRIMARY KEY,
                 source_id TEXT NOT NULL,
                 target_id TEXT NOT NULL,
                 type TEXT NOT NULL,
                 weight REAL DEFAULT 1.0,
-                attributes JSON,
+                attributes {json_type},
                 FOREIGN KEY(source_id) REFERENCES nodes(id),
                 FOREIGN KEY(target_id) REFERENCES nodes(id)
+            )
+        """)
+        
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS amendments (
+                id TEXT PRIMARY KEY,
+                timestamp REAL,
+                action TEXT,
+                entity_type TEXT,
+                payload {json_type},
+                reverted INTEGER DEFAULT 0
             )
         """)
         
@@ -171,10 +202,20 @@ class GraphStore:
                 return self._nodes_cache[node_id]
 
             cursor = self.conn.cursor()
-            cursor.execute("SELECT id, type, attributes FROM nodes WHERE id = ?", (node_id,))
+            if self.is_postgres:
+                cursor.execute("SELECT id, type, attributes FROM nodes WHERE id = %s", (node_id,))
+            else:
+                cursor.execute("SELECT id, type, attributes FROM nodes WHERE id = ?", (node_id,))
             row = cursor.fetchone()
             if row:
-                return Node(id=row[0], type=NodeType(row[1]), attributes=json.loads(row[2]))
+                type_val = row[1]
+                try:
+                    node_type = NodeType(type_val)
+                except ValueError:
+                    node_type = type_val
+                
+                attrs = row[2] if isinstance(row[2], dict) else json.loads(row[2]) if row[2] else {}
+                return Node(id=row[0], type=node_type, attributes=attrs)
             return None
     
     def count_nodes(self) -> int:
@@ -208,12 +249,12 @@ class GraphStore:
             self._flush_edges(cursor)
             self.conn.commit()
 
-    def _flush_nodes(self, cursor: sqlite3.Cursor) -> None:
+    def _flush_nodes(self, cursor: Any) -> None:
         """
         Perform the bulk insert/update of nodes.
 
         Args:
-            cursor (sqlite3.Cursor): The database cursor.
+            cursor: The database cursor.
 
         Returns:
             None
@@ -224,22 +265,33 @@ class GraphStore:
         node_data = []
         for node in self._nodes_cache.values():
             node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
-            node_data.append((node.id, node_type, json.dumps(node.attributes)))
+            if self.is_postgres:
+                node_data.append((node.id, node_type, psycopg2.extras.Json(node.attributes)))
+            else:
+                node_data.append((node.id, node_type, json.dumps(node.attributes)))
         
-        cursor.executemany("""
-            INSERT INTO nodes (id, type, attributes)
-            VALUES (?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                attributes = json_patch(nodes.attributes, excluded.attributes)
-        """, node_data)
+        if self.is_postgres:
+            psycopg2.extras.execute_batch(cursor, """
+                INSERT INTO nodes (id, type, attributes)
+                VALUES (%s, %s, %s)
+                ON CONFLICT(id) DO UPDATE SET
+                    attributes = nodes.attributes || EXCLUDED.attributes
+            """, node_data)
+        else:
+            cursor.executemany("""
+                INSERT INTO nodes (id, type, attributes)
+                VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    attributes = json_patch(nodes.attributes, excluded.attributes)
+            """, node_data)
         self._nodes_cache.clear()
 
-    def _flush_edges(self, cursor: sqlite3.Cursor) -> None:
+    def _flush_edges(self, cursor: Any) -> None:
         """
         Perform the bulk insert/update of edges.
 
         Args:
-            cursor (sqlite3.Cursor): The database cursor.
+            cursor: The database cursor.
 
         Returns:
             None
@@ -250,15 +302,27 @@ class GraphStore:
         edge_data = []
         for edge in self._edges_cache.values():
             edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
-            edge_data.append((edge.id, edge.source_id, edge.target_id, edge_type, edge.weight, json.dumps(edge.attributes)))
+            if self.is_postgres:
+                edge_data.append((edge.id, edge.source_id, edge.target_id, edge_type, edge.weight, psycopg2.extras.Json(edge.attributes)))
+            else:
+                edge_data.append((edge.id, edge.source_id, edge.target_id, edge_type, edge.weight, json.dumps(edge.attributes)))
 
-        cursor.executemany("""
-            INSERT INTO edges (id, source_id, target_id, type, weight, attributes)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                weight = excluded.weight,
-                attributes = json_patch(edges.attributes, excluded.attributes)
-        """, edge_data)
+        if self.is_postgres:
+            psycopg2.extras.execute_batch(cursor, """
+                INSERT INTO edges (id, source_id, target_id, type, weight, attributes)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT(id) DO UPDATE SET
+                    weight = EXCLUDED.weight,
+                    attributes = edges.attributes || EXCLUDED.attributes
+            """, edge_data)
+        else:
+            cursor.executemany("""
+                INSERT INTO edges (id, source_id, target_id, type, weight, attributes)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    weight = excluded.weight,
+                    attributes = json_patch(edges.attributes, excluded.attributes)
+            """, edge_data)
         self._edges_cache.clear()
 
     def commit(self) -> None:
@@ -286,8 +350,28 @@ class GraphStore:
         Returns:
             None
         """
-        if hasattr(self, 'conn'):
+        if hasattr(self, 'conn') and self.conn:
             self.finalize()
             self.conn.close()
+
+    def log_amendment(self, action: str, entity_type: str, payload: Any) -> None:
+        """
+        Log an amendment to the graph to support replayability.
+        """
+        amend_id = str(uuid.uuid4())
+        ts = time.time()
+        
+        cursor = self.conn.cursor()
+        if self.is_postgres:
+            cursor.execute("""
+                INSERT INTO amendments (id, timestamp, action, entity_type, payload)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (amend_id, ts, action, entity_type, psycopg2.extras.Json(payload)))
+        else:
+            cursor.execute("""
+                INSERT INTO amendments (id, timestamp, action, entity_type, payload)
+                VALUES (?, ?, ?, ?, ?)
+            """, (amend_id, ts, action, entity_type, json.dumps(payload)))
+        self.conn.commit()
 
 

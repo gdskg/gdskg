@@ -10,6 +10,11 @@ from analysis.keyword_extractor import KeywordExtractor
 from core.vector_store import VectorStore
 from analysis.embedder import ONNXEmbedder
 
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
 class SearchEngine:
     """Search engine for querying the knowledge graph."""
 
@@ -23,12 +28,22 @@ class SearchEngine:
                 Defaults to ~/.gdskg/vector_db/gdskg_vectors.db if not provided.
         """
         self.db_path = db_path
+        self.db_url = os.environ.get("GDSKG_DB_URL")
+        self.is_postgres = bool(self.db_url)
+        self.ph = "%s" if self.is_postgres else "?"
+        
         if vector_db_path:
             self.vector_db_path = vector_db_path
         else:
             vector_dir = Path(os.environ.get("GDSKG_VECTOR_DB_DIR", Path.home() / ".gdskg" / "vector_db"))
             vector_dir.mkdir(parents=True, exist_ok=True)
             self.vector_db_path = str(vector_dir / "gdskg_vectors.db")
+
+    def _get_conn(self):
+        if self.is_postgres:
+            return psycopg2.connect(self.db_url)
+        else:
+            return sqlite3.connect(self.db_path)
 
     def search(self, query: str = "", repo_name: str = None, depth: int = 1, traverse_types: List[str] = None, exclude_types: List[str] = None, semantic_only: bool = False, min_score: float = 10.0, top_n: int = 5, filters: Dict[str, str] = None, all_matches: bool = False, all_files: bool = False, excluded_commits: List[str] = None, offset: int = 0, negative_query: str = "") -> List[Dict[str, Any]]:
         """
@@ -66,12 +81,12 @@ class SearchEngine:
             allowed_types.discard(NodeType.AST_NODE.value)
 
         exclude_types = {t.upper().rstrip('S') for t in exclude_types} if exclude_types else set()
-        # Ensure we can still see commits if not explicitly excluding them, 
-        # but usually exclude_types is for traversal noise.
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            repo_ids = self._get_repo_ids(cursor, repo_name) if repo_name else set()
+        conn = self._get_conn()
+        try:
+            with conn:
+                cursor = conn.cursor()
+                repo_ids = self._get_repo_ids(cursor, repo_name) if repo_name else set()
             if repo_name and not repo_ids:
                 return []
 
@@ -121,6 +136,8 @@ class SearchEngine:
 
             if depth > 0:
                 self._run_graph_traversal(cursor, top_commits, depth, keywords, semantic_relevance_set, allowed_types, exclude_types, all_matches, all_files, negative_keywords, negative_semantic_set)
+        finally:
+            conn.close()
 
         return top_commits
 
@@ -150,7 +167,10 @@ class SearchEngine:
         Returns:
             Set[str]: A set of unique node IDs belonging to the matched repositories.
         """
-        cursor.execute("SELECT id FROM nodes WHERE type = ? AND json_extract(attributes, '$.name') = ?", (NodeType.REPOSITORY.value, repo_name))
+        if self.is_postgres:
+            cursor.execute("SELECT id FROM nodes WHERE type = %s AND attributes->>'name' = %s", (NodeType.REPOSITORY.value, repo_name))
+        else:
+            cursor.execute("SELECT id FROM nodes WHERE type = ? AND json_extract(attributes, '$.name') = ?", (NodeType.REPOSITORY.value, repo_name))
         return {r[0] for r in cursor.fetchall()}
 
     def _apply_strict_filters(self, cursor: sqlite3.Cursor, filters: Optional[Dict[str, str]]) -> Optional[Set[str]]:
@@ -168,18 +188,23 @@ class SearchEngine:
             return None
         allowed = None
         for ftype, fval in filters.items():
-            cursor.execute("""
-                SELECT id FROM nodes WHERE type = ? AND (id LIKE ? OR json_extract(attributes, '$.name') LIKE ? OR json_extract(attributes, '$.content') LIKE ?)
-            """, (ftype.upper(), f"%{fval}%", f"%{fval}%", f"%{fval}%"))
+            if self.is_postgres:
+                cursor.execute("""
+                    SELECT id FROM nodes WHERE type = %s AND (id ILIKE %s OR attributes->>'name' ILIKE %s OR attributes->>'content' ILIKE %s)
+                """, (ftype.upper(), f"%{fval}%", f"%{fval}%", f"%{fval}%"))
+            else:
+                cursor.execute("""
+                    SELECT id FROM nodes WHERE type = ? AND (id LIKE ? OR json_extract(attributes, '$.name') LIKE ? OR json_extract(attributes, '$.content') LIKE ?)
+                """, (ftype.upper(), f"%{fval}%", f"%{fval}%", f"%{fval}%"))
             matched_nodes = [r[0] for r in cursor.fetchall()]
             if not matched_nodes:
                 return set()
             
-            p = ",".join(["?"] * len(matched_nodes))
+            p = ",".join([self.ph] * len(matched_nodes))
             cursor.execute(f"""
-                SELECT source_id FROM edges WHERE target_id IN ({p}) AND source_id IN (SELECT id FROM nodes WHERE type=?)
+                SELECT source_id FROM edges WHERE target_id IN ({p}) AND source_id IN (SELECT id FROM nodes WHERE type={self.ph})
                 UNION
-                SELECT target_id FROM edges WHERE source_id IN ({p}) AND target_id IN (SELECT id FROM nodes WHERE type=?)
+                SELECT target_id FROM edges WHERE source_id IN ({p}) AND target_id IN (SELECT id FROM nodes WHERE type={self.ph})
             """, matched_nodes + [NodeType.COMMIT.value] + matched_nodes + [NodeType.COMMIT.value])
             matches = {r[0] for r in cursor.fetchall()}
             if not matches:
@@ -219,24 +244,32 @@ class SearchEngine:
             is_negative (bool): If True, matching nodes will penalize relevance instead of increasing it.
         """
         for kw in keywords:
-            cursor.execute("""
-                SELECT id, type, attributes FROM nodes 
-                WHERE id LIKE ? OR json_extract(attributes, '$.name') LIKE ? OR json_extract(attributes, '$.message') LIKE ? OR 
-                      json_extract(attributes, '$.content') LIKE ? OR json_extract(attributes, '$.author_name') LIKE ? OR json_extract(attributes, '$.author_email') LIKE ? OR
-                      json_extract(attributes, '$.body') LIKE ? OR json_extract(attributes, '$.description') LIKE ?
-            """, (f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%"))
+            if self.is_postgres:
+                cursor.execute("""
+                    SELECT id, type, attributes FROM nodes 
+                    WHERE id ILIKE %s OR attributes->>'name' ILIKE %s OR attributes->>'message' ILIKE %s OR 
+                          attributes->>'content' ILIKE %s OR attributes->>'author_name' ILIKE %s OR attributes->>'author_email' ILIKE %s OR
+                          attributes->>'body' ILIKE %s OR attributes->>'description' ILIKE %s
+                """, (f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%"))
+            else:
+                cursor.execute("""
+                    SELECT id, type, attributes FROM nodes 
+                    WHERE id LIKE ? OR json_extract(attributes, '$.name') LIKE ? OR json_extract(attributes, '$.message') LIKE ? OR 
+                          json_extract(attributes, '$.content') LIKE ? OR json_extract(attributes, '$.author_name') LIKE ? OR json_extract(attributes, '$.author_email') LIKE ? OR
+                          json_extract(attributes, '$.body') LIKE ? OR json_extract(attributes, '$.description') LIKE ?
+                """, (f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%"))
             
             for nid, ntype, n_attr_json in cursor.fetchall():
                 linked_commits = []
                 if ntype == NodeType.COMMIT.value:
                     linked_commits = [nid]
                 elif ntype == NodeType.KEYWORD.value:
-                    cursor.execute("SELECT source_id FROM edges WHERE target_id = ? AND type = ?", (nid, EdgeType.HAS_KEYWORD.value))
+                    cursor.execute(f"SELECT source_id FROM edges WHERE target_id = {self.ph} AND type = {self.ph}", (nid, EdgeType.HAS_KEYWORD.value))
                     linked_commits = [r[0] for r in cursor.fetchall()]
                 else:
-                    cursor.execute("SELECT source_id FROM edges WHERE target_id = ? UNION SELECT target_id FROM edges WHERE source_id = ?", (nid, nid))
+                    cursor.execute(f"SELECT source_id FROM edges WHERE target_id = {self.ph} UNION SELECT target_id FROM edges WHERE source_id = {self.ph}", (nid, nid))
                     for pid in [r[0] for r in cursor.fetchall()]:
-                        cursor.execute("SELECT type FROM nodes WHERE id = ?", (pid,))
+                        cursor.execute(f"SELECT type FROM nodes WHERE id = {self.ph}", (pid,))
                         row = cursor.fetchone()
                         if row and row[0] == NodeType.COMMIT.value:
                             linked_commits.append(pid)
@@ -301,16 +334,16 @@ class SearchEngine:
                 linked_commits = []
                 reason = f"Similar meaning identified (matched {ntype} '{nid}' score={sim:.2f})"
                 if ntype == NodeType.SYMBOL.value:
-                    cursor.execute("SELECT target_id FROM edges WHERE source_id = ? AND type = ?", (nid, EdgeType.MODIFIED_SYMBOL.value))
+                    cursor.execute(f"SELECT target_id FROM edges WHERE source_id = {self.ph} AND type = {self.ph}", (nid, EdgeType.MODIFIED_SYMBOL.value))
                     linked_commits = [r[0] for r in cursor.fetchall()]
                 elif ntype == NodeType.FUNCTION.value:
-                    cursor.execute("SELECT source_id FROM edges WHERE target_id = ? AND type = ?", (nid, EdgeType.MODIFIED_FUNCTION.value))
+                    cursor.execute(f"SELECT source_id FROM edges WHERE target_id = {self.ph} AND type = {self.ph}", (nid, EdgeType.MODIFIED_FUNCTION.value))
                     linked_commits = [r[0] for r in cursor.fetchall()]
                 elif ntype == NodeType.PULL_REQUEST.value:
-                    cursor.execute("SELECT source_id FROM edges WHERE target_id = ? AND type = ?", (nid, EdgeType.RELATED_TO_PR.value))
+                    cursor.execute(f"SELECT source_id FROM edges WHERE target_id = {self.ph} AND type = {self.ph}", (nid, EdgeType.RELATED_TO_PR.value))
                     linked_commits = [r[0] for r in cursor.fetchall()]
                 elif ntype == NodeType.CLICKUP_TASK.value:
-                    cursor.execute("SELECT source_id FROM edges WHERE target_id = ? AND type = ?", (nid, EdgeType.RELATED_TO_TASK.value))
+                    cursor.execute(f"SELECT source_id FROM edges WHERE target_id = {self.ph} AND type = {self.ph}", (nid, EdgeType.RELATED_TO_TASK.value))
                     linked_commits = [r[0] for r in cursor.fetchall()]
                 elif ntype in [NodeType.COMMIT.value, NodeType.COMMIT_MESSAGE.value, "COMMIT_SYMBOLS"]:
                     linked_commits = [nid]
@@ -347,7 +380,7 @@ class SearchEngine:
             commits (Dict): The results dictionary containing current scores.
         """
         for cdict in commits.values():
-            cursor.execute("SELECT count(*) FROM edges WHERE source_id = ? AND type = ?", (cdict["id"], EdgeType.MODIFIED_FILE.value))
+            cursor.execute(f"SELECT count(*) FROM edges WHERE source_id = {self.ph} AND type = {self.ph}", (cdict["id"], EdgeType.MODIFIED_FILE.value))
             num_files = cursor.fetchone()[0]
             if num_files > 0:
                 penalty = max(1.0, math.log10(num_files))
@@ -381,16 +414,16 @@ class SearchEngine:
                 curr_id, dist = queue.pop(0)
                 if dist >= depth: continue
                 
-                cursor.execute("SELECT target_id, type FROM edges WHERE source_id = ? UNION SELECT source_id, type FROM edges WHERE target_id = ?", (curr_id, curr_id))
+                cursor.execute(f"SELECT target_id, type FROM edges WHERE source_id = {self.ph} UNION SELECT source_id, type FROM edges WHERE target_id = {self.ph}", (curr_id, curr_id))
                 for nid, _ in cursor.fetchall():
                     if nid in visited: continue
                     visited.add(nid)
                     
-                    cursor.execute("SELECT type, attributes FROM nodes WHERE id = ?", (nid,))
+                    cursor.execute(f"SELECT type, attributes FROM nodes WHERE id = {self.ph}", (nid,))
                     row = cursor.fetchone()
                     if not row: continue
                     ntype, n_attrs_json = row
-                    n_attrs = json.loads(n_attrs_json) if n_attrs_json else {}
+                    n_attrs = n_attrs_json if isinstance(n_attrs_json, dict) else (json.loads(n_attrs_json) if n_attrs_json else {})
 
                     is_trigger = nid in cdict["connections"] and cdict["connections"][nid].get("distance", -1) == 0
                     if not all_matches and not is_trigger:
@@ -440,7 +473,7 @@ class SearchEngine:
             return any(kw in nid.lower() or kw in str(attrs.get("name", "")).lower() for kw in keywords)
         if ntype == NodeType.SYMBOL.value: return False
         if ntype == NodeType.FILE.value and not all_files:
-            cursor.execute("SELECT target_id FROM edges WHERE source_id = ? AND type IN (?, ?, ?) UNION SELECT source_id FROM edges WHERE target_id = ? AND type IN (?, ?, ?)", 
+            cursor.execute(f"SELECT target_id FROM edges WHERE source_id = {self.ph} AND type IN ({self.ph}, {self.ph}, {self.ph}) UNION SELECT source_id FROM edges WHERE target_id = {self.ph} AND type IN ({self.ph}, {self.ph}, {self.ph})", 
                            (nid, EdgeType.HAS_SYMBOL.value, EdgeType.HAS_KEYWORD.value, EdgeType.MODIFIED_SYMBOL.value, nid, EdgeType.HAS_SYMBOL.value, EdgeType.HAS_KEYWORD.value, EdgeType.MODIFIED_SYMBOL.value))
             return any(ln in semantic_set or any(kw in ln.lower() for kw in keywords) for ln, in cursor.fetchall())
         if ntype in [NodeType.COMMIT.value, NodeType.COMMIT_MESSAGE.value, NodeType.COMMENT.value, NodeType.SECRET.value, NodeType.FUNCTION.value, NodeType.PULL_REQUEST.value, NodeType.CLICKUP_TASK.value]:
@@ -473,17 +506,17 @@ class SearchEngine:
         """
         if commit_id in commits: return
         if repo_ids:
-            p = ",".join("?" * len(repo_ids))
-            cursor.execute(f"SELECT 1 FROM edges WHERE source_id = ? AND target_id IN ({p}) AND type = ?", (commit_id, *repo_ids, EdgeType.PART_OF_REPO.value))
+            p = ",".join(self.ph for _ in repo_ids)
+            cursor.execute(f"SELECT 1 FROM edges WHERE source_id = {self.ph} AND target_id IN ({p}) AND type = {self.ph}", (commit_id, *repo_ids, EdgeType.PART_OF_REPO.value))
             if not cursor.fetchone(): return
 
         if not attr_json:
-            cursor.execute("SELECT attributes FROM nodes WHERE id = ?", (commit_id,))
+            cursor.execute(f"SELECT attributes FROM nodes WHERE id = {self.ph}", (commit_id,))
             row = cursor.fetchone()
             if not row: return
             attr_json = row[0]
 
-        attrs = json.loads(attr_json)
+        attrs = attr_json if isinstance(attr_json, dict) else (json.loads(attr_json) if attr_json else {})
         commits[commit_id] = {
             "id": commit_id,
             "message": attrs.get("message", "No message"),
@@ -511,13 +544,15 @@ class SearchEngine:
         from core.schema import NodeType, EdgeType
         import sqlite3
         
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # 1. Determine the node type (with fuzzy resolution)
-            supported_types = (NodeType.FILE.value, NodeType.FUNCTION.value, NodeType.FUNCTION_VERSION.value)
-            cursor.execute("SELECT id, type, attributes FROM nodes WHERE id = ?", (node_id,))
-            row = cursor.fetchone()
+        conn = self._get_conn()
+        try:
+            with conn:
+                cursor = conn.cursor()
+                
+                # 1. Determine the node type (with fuzzy resolution)
+                supported_types = (NodeType.FILE.value, NodeType.FUNCTION.value, NodeType.FUNCTION_VERSION.value)
+                cursor.execute(f"SELECT id, type, attributes FROM nodes WHERE id = {self.ph}", (node_id,))
+                row = cursor.fetchone()
             
             # If exact match exists but is NOT a supported type, ignore it and try fuzzy
             if row and row[1] not in supported_types:
@@ -525,8 +560,11 @@ class SearchEngine:
 
             if not row:
                 # Try fuzzy matching
-                placeholders = ",".join("?" * len(supported_types))
-                cursor.execute(f"SELECT id, type, attributes FROM nodes WHERE type IN ({placeholders}) AND (id LIKE ? OR id LIKE ?)", supported_types + (f"%{node_id}%", f"FILE:%{node_id}%"))
+                placeholders = ",".join([self.ph] * len(supported_types))
+                if self.is_postgres:
+                    cursor.execute(f"SELECT id, type, attributes FROM nodes WHERE type IN ({placeholders}) AND (id ILIKE %s OR id ILIKE %s)", supported_types + (f"%{node_id}%", f"FILE:%{node_id}%"))
+                else:
+                    cursor.execute(f"SELECT id, type, attributes FROM nodes WHERE type IN ({placeholders}) AND (id LIKE ? OR id LIKE ?)", supported_types + (f"%{node_id}%", f"FILE:%{node_id}%"))
                 fuzzy_matches = cursor.fetchall()
                 
                 if len(fuzzy_matches) == 1:
@@ -554,13 +592,20 @@ class SearchEngine:
                 base_msg = f"Node '{node_id}' does not exist in the graph. Check the format (e.g., 'FILE:path/to/file.py' or 'FUNCTION:pkg.module.function')."
                 
                 # Try finding a similarly named node to suggest
-                cursor.execute("SELECT id FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'FUNCTION_VERSION') AND id LIKE ? LIMIT 5", (f"%{node_id}%",))
-                similar_nodes = [r[0] for r in cursor.fetchall()]
-                if not similar_nodes:
-                    # Try even looser search (basename equivalent)
-                    base_id = node_id.split('/')[-1].split(':')[-1]
-                    cursor.execute("SELECT id FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'FUNCTION_VERSION') AND id LIKE ? LIMIT 5", (f"%{base_id}%",))
+                if self.is_postgres:
+                    cursor.execute("SELECT id FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'FUNCTION_VERSION') AND id ILIKE %s LIMIT 5", (f"%{node_id}%",))
                     similar_nodes = [r[0] for r in cursor.fetchall()]
+                    if not similar_nodes:
+                        base_id = node_id.split('/')[-1].split(':')[-1]
+                        cursor.execute("SELECT id FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'FUNCTION_VERSION') AND id ILIKE %s LIMIT 5", (f"%{base_id}%",))
+                        similar_nodes = [r[0] for r in cursor.fetchall()]
+                else:
+                    cursor.execute("SELECT id FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'FUNCTION_VERSION') AND id LIKE ? LIMIT 5", (f"%{node_id}%",))
+                    similar_nodes = [r[0] for r in cursor.fetchall()]
+                    if not similar_nodes:
+                        base_id = node_id.split('/')[-1].split(':')[-1]
+                        cursor.execute("SELECT id FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'FUNCTION_VERSION') AND id LIKE ? LIMIT 5", (f"%{base_id}%",))
+                        similar_nodes = [r[0] for r in cursor.fetchall()]
                 
                 if similar_nodes:
                     suggestions = "\n".join(f"- {s}" for s in similar_nodes)
@@ -569,7 +614,7 @@ class SearchEngine:
                 
             actual_id, ntype, attrs_json = row
             node_id = actual_id
-            attrs = json.loads(attrs_json) if attrs_json else {}
+            attrs = attrs_json if isinstance(attrs_json, dict) else (json.loads(attrs_json) if attrs_json else {})
             
             file_content = ""
             language = ""
@@ -584,11 +629,11 @@ class SearchEngine:
                 ]
                 
                 # Check for cached clone or root_path metadata in the REPOSITORY node
-                cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.REPOSITORY.value,))
+                cursor.execute(f"SELECT id, attributes FROM nodes WHERE type = {self.ph}", (NodeType.REPOSITORY.value,))
                 repo_row = cursor.fetchone()
                 if repo_row:
                     repo_id, repo_attrs_json = repo_row
-                    repo_attrs = json.loads(repo_attrs_json) if repo_attrs_json else {}
+                    repo_attrs = repo_attrs_json if isinstance(repo_attrs_json, dict) else (json.loads(repo_attrs_json) if repo_attrs_json else {})
                     
                     # Try root_path if available
                     root_path = repo_attrs.get("root_path")
@@ -632,19 +677,19 @@ class SearchEngine:
                 language = TreeSitterUtils.map_extension_to_language(extension)
                 
             elif ntype == NodeType.FUNCTION.value:
-                cursor.execute("""
-                    SELECT target_id FROM edges WHERE source_id = ? AND type = ?
+                cursor.execute(f"""
+                    SELECT target_id FROM edges WHERE source_id = {self.ph} AND type = {self.ph}
                 """, (node_id, EdgeType.HAS_HISTORY.value))
                 history_row = cursor.fetchone()
                 if not history_row:
                     raise ValueError(f"Function '{node_id}' has no history edge in the graph.")
                 
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT n.id, n.attributes FROM nodes n
                     JOIN edges e ON n.id = e.target_id
-                    WHERE e.source_id = ? AND e.type = ?
+                    WHERE e.source_id = {self.ph} AND e.type = {self.ph}
                     AND NOT EXISTS (
-                        SELECT 1 FROM edges e2 WHERE e2.source_id = n.id AND e2.type = ?
+                        SELECT 1 FROM edges e2 WHERE e2.source_id = n.id AND e2.type = {self.ph}
                     )
                 """, (history_row[0], EdgeType.HAS_VERSION.value, EdgeType.PREVIOUS_VERSION.value))
                 
@@ -652,7 +697,7 @@ class SearchEngine:
                 if not v_row:
                     raise ValueError(f"Function '{node_id}' has a history group but no latest version node.")
                 
-                v_attrs = json.loads(v_row[1])
+                v_attrs = v_row[1] if isinstance(v_row[1], dict) else json.loads(v_row[1])
                 file_content = v_attrs.get('content', '')
                 extension = Path(v_attrs.get('file_path', '')).suffix
                 language = TreeSitterUtils.map_extension_to_language(extension)
@@ -662,13 +707,16 @@ class SearchEngine:
             else:
                 raise ValueError(f"Node '{node_id}' is of type '{ntype}'. AST extraction is only supported for FILE, FUNCTION, and FUNCTION_VERSION types.")
                 
+        finally:
+            conn.close()
+
         if not language:
             raise ValueError(f"Could determine correct tree-sitter language for '{node_id}'.")
             
-        # 2. Extract and filter AST nodes in memory
         nodes = AstExtractor.get_ast_nodes(file_content, language, max_depth, query)
         if not nodes:
             raise ValueError(f"AST extraction returned no nodes. The language '{language}' might not be installed or parseable, or the content could be empty.")
+        
         return nodes
 
     def get_dependencies(self, node_id: str) -> Dict[str, Any]:
@@ -681,15 +729,20 @@ class SearchEngine:
         Returns:
             A dictionary containing the node ID and its dependencies/dependents.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # 1. Resolve node ID (fuzzy)
-            cursor.execute("SELECT id, type FROM nodes WHERE id = ?", (node_id,))
-            row = cursor.fetchone()
+        conn = self._get_conn()
+        try:
+            with conn:
+                cursor = conn.cursor()
+                
+                # 1. Resolve node ID (fuzzy)
+                cursor.execute(f"SELECT id, type FROM nodes WHERE id = {self.ph}", (node_id,))
+                row = cursor.fetchone()
             
             if not row:
-                cursor.execute("SELECT id, type FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'SYMBOL', 'COMMIT') AND (id LIKE ? OR id LIKE ?)", (f"%{node_id}%", f"FILE:%{node_id}%"))
+                if self.is_postgres:
+                    cursor.execute("SELECT id, type FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'SYMBOL', 'COMMIT') AND (id ILIKE %s OR id ILIKE %s)", (f"%{node_id}%", f"FILE:%{node_id}%"))
+                else:
+                    cursor.execute("SELECT id, type FROM nodes WHERE type IN ('FILE', 'FUNCTION', 'SYMBOL', 'COMMIT') AND (id LIKE ? OR id LIKE ?)", (f"%{node_id}%", f"FILE:%{node_id}%"))
                 matches = cursor.fetchall()
                 if len(matches) == 1:
                     row = matches[0]
@@ -709,17 +762,17 @@ class SearchEngine:
             
             # 2. Get outgoing edges (dependencies)
             # We join with 'nodes' to get the type and attributes of the target
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT e.target_id, e.type, n.type, n.attributes
                 FROM edges e 
                 JOIN nodes n ON e.target_id = n.id 
-                WHERE e.source_id = ? 
+                WHERE e.source_id = {self.ph} 
                 AND e.type NOT IN ('CONTAINS_COMMENT', 'HAS_KEYWORD')
             """, (resolved_id,))
             
             dependencies = []
             for tid, etype, target_ntype, attrs_json in cursor.fetchall():
-                attrs = json.loads(attrs_json) if attrs_json else {}
+                attrs = attrs_json if isinstance(attrs_json, dict) else (json.loads(attrs_json) if attrs_json else {})
                 # Extract a readable name
                 name = attrs.get('name')
                 if not name:
@@ -738,17 +791,17 @@ class SearchEngine:
                 })
             
             # 3. Get incoming edges (dependents)
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT e.source_id, e.type, n.type, n.attributes
                 FROM edges e 
                 JOIN nodes n ON e.source_id = n.id 
-                WHERE e.target_id = ? 
+                WHERE e.target_id = {self.ph} 
                 AND e.type NOT IN ('CONTAINS_COMMENT', 'HAS_KEYWORD')
             """, (resolved_id,))
             
             dependents = []
             for sid, etype, source_ntype, attrs_json in cursor.fetchall():
-                attrs = json.loads(attrs_json) if attrs_json else {}
+                attrs = attrs_json if isinstance(attrs_json, dict) else (json.loads(attrs_json) if attrs_json else {})
                 # Extract a readable name
                 name = attrs.get('name')
                 if not name:
@@ -772,6 +825,8 @@ class SearchEngine:
                 "dependencies": dependencies,
                 "dependents": dependents
             }
+        finally:
+            conn.close()
 
     def get_node_types(self) -> List[str]:
         """
@@ -780,7 +835,27 @@ class SearchEngine:
         Returns:
             List[str]: A list of alphabetical node types.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT type FROM nodes ORDER BY type")
-            return [row[0] for row in cursor.fetchall()]
+        conn = self._get_conn()
+        try:
+            with conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT type FROM nodes ORDER BY type")
+                return [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def get_edge_types(self) -> List[str]:
+        """
+        Retrieve all unique edge types currently present in the knowledge graph.
+        
+        Returns:
+            List[str]: A list of alphabetical edge types.
+        """
+        conn = self._get_conn()
+        try:
+            with conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT type FROM edges ORDER BY type")
+                return [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()

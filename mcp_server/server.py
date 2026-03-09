@@ -672,3 +672,100 @@ def list_node_types() -> Dict[str, Any]:
         return {"node_types": types}
     except Exception as e:
         return {"error": f"Error retrieving node types: {str(e)}"}
+
+@mcp.tool()
+def list_edge_types() -> Dict[str, Any]:
+    """
+    Retrieve all unique edge types currently present in the knowledge graph.
+    
+    Returns:
+        Dict[str, Any]: A list of edge types.
+    """
+    if not _read_server_status():
+        return {"error": "Server is stopped."}
+
+    db_path = DEFAULT_GRAPH_PATH / "gdskg.db"
+    if not db_path.exists():
+        return {"error": "Index repo first."}
+
+    try:
+        from analysis.search_engine import SearchEngine
+        searcher = SearchEngine(str(db_path))
+        types = searcher.get_edge_types()
+        return {"edge_types": types}
+    except Exception as e:
+        return {"error": f"Error retrieving edge types: {str(e)}"}
+
+@mcp.tool()
+def amend_graph(
+    action: str,
+    entity_type: str,
+    data: str
+) -> Dict[str, Any]:
+    """
+    Apply an amendment (correction or addition) to the knowledge graph.
+    
+    Args:
+        action (str): The action to perform (e.g., 'add_node', 'update_node', 'add_edge', 'update_edge').
+        entity_type (str): The type of entity being amended (e.g., node type or edge type).
+        data (str): A JSON string containing the data for the amendment.
+                   For nodes: {"id": "node_id", "attributes": {"key": "value"}}
+                   For edges: {"source_id": "src", "target_id": "dst", "attributes": {"key": "value"}}
+                   
+    Returns:
+        Dict[str, Any]: A success message or an error.
+    """
+    if not _read_server_status():
+        return {"error": "Server is stopped."}
+
+    db_path = DEFAULT_GRAPH_PATH / "gdskg.db"
+    
+    try:
+        from core.graph_store import GraphStore
+        from core.schema import Node, Edge, NodeType, EdgeType
+        import json
+        
+        parsed_data = json.loads(data)
+        store = GraphStore(db_path)
+        
+        # Ensure type is safely assigned even if not in Enum
+        try:
+            enum_type = NodeType(entity_type)
+            stored_type = enum_type.value
+        except ValueError:
+            try:
+                enum_type = EdgeType(entity_type)
+                stored_type = enum_type.value
+            except ValueError:
+                stored_type = entity_type
+
+        if action in ("add_node", "update_node"):
+            node_id = parsed_data.get("id")
+            if not node_id:
+                return {"error": "Missing 'id' in data for node."}
+            attributes = parsed_data.get("attributes", {})
+            
+            node = Node(id=node_id, type=stored_type, attributes=attributes)
+            store.upsert_node(node)
+            store.flush()
+            store.log_amendment(action, stored_type, parsed_data)
+            
+        elif action in ("add_edge", "update_edge"):
+            source_id = parsed_data.get("source_id")
+            target_id = parsed_data.get("target_id")
+            if not source_id or not target_id:
+                return {"error": "Missing 'source_id' or 'target_id' in data for edge."}
+            attributes = parsed_data.get("attributes", {})
+            
+            edge = Edge(source_id=source_id, target_id=target_id, type=stored_type, attributes=attributes)
+            store.upsert_edge(edge)
+            store.flush()
+            store.log_amendment(action, stored_type, parsed_data)
+        else:
+            return {"error": f"Unsupported amendment action: {action}"}
+            
+        store.close()
+        return {"message": f"Successfully applied {action} for {entity_type}."}
+        
+    except Exception as e:
+        return {"error": f"Error applying amendment: {str(e)}"}

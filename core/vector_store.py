@@ -7,6 +7,12 @@ import os
 
 from core.schema import NodeType, EdgeType
 
+try:
+    import psycopg2
+    from pgvector.psycopg2 import register_vector
+except ImportError:
+    psycopg2 = None
+
 class VectorStore:
     """Persistent storage for node embeddings using SQLite and numpy."""
     
@@ -22,10 +28,23 @@ class VectorStore:
             vector_dir = Path(os.environ.get("GDSKG_VECTOR_DB_DIR", Path.home() / ".gdskg" / "vector_db"))
             vector_dir.mkdir(parents=True, exist_ok=True)
             self.db_path = vector_dir / "gdskg_vectors.db"
-        elif db_path.is_dir():
+        elif isinstance(db_path, Path) and db_path.is_dir():
             self.db_path = db_path / "gdskg_vectors.db"
         else:
             self.db_path = db_path
+            
+        self.db_url = os.environ.get("GDSKG_DB_URL")
+        self.is_postgres = bool(self.db_url)
+        self.ph = "%s" if self.is_postgres else "?"
+        
+        if self.is_postgres:
+            if psycopg2 is None:
+                raise ImportError("psycopg2-binary and pgvector are required for PostgreSQL support. Install them with pip.")
+            self.conn = psycopg2.connect(self.db_url)
+            with self.conn.cursor() as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            self.conn.commit()
+            register_vector(self.conn)
         self._init_db()
         
     def _init_db(self) -> None:
@@ -35,19 +54,33 @@ class VectorStore:
         Returns:
             None
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS embeddings (
-                    node_id TEXT NOT NULL,
-                    chunk_id INTEGER NOT NULL,
-                    node_type TEXT NOT NULL,
-                    embedding BLOB NOT NULL,
-                    PRIMARY KEY (node_id, chunk_id)
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_emb_type ON embeddings(node_type)")
-            conn.commit()
+        if self.is_postgres:
+            with self.conn.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS embeddings (
+                        node_id TEXT NOT NULL,
+                        chunk_id INTEGER NOT NULL,
+                        node_type TEXT NOT NULL,
+                        embedding vector(384) NOT NULL,
+                        PRIMARY KEY (node_id, chunk_id)
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_emb_type ON embeddings(node_type)")
+            self.conn.commit()
+        else:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS embeddings (
+                        node_id TEXT NOT NULL,
+                        chunk_id INTEGER NOT NULL,
+                        node_type TEXT NOT NULL,
+                        embedding BLOB NOT NULL,
+                        PRIMARY KEY (node_id, chunk_id)
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_emb_type ON embeddings(node_type)")
+                conn.commit()
             
     def upsert_embedding(self, node_id: str, node_type: str, embeddings: List[np.ndarray]) -> None:
         """
@@ -61,17 +94,28 @@ class VectorStore:
         Returns:
             None
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM embeddings WHERE node_id = ?", (node_id,))
-            
-            for chunk_id, emb in enumerate(embeddings):
-                emb_blob = emb.astype(np.float32).tobytes()
-                cursor.execute("""
-                    INSERT INTO embeddings (node_id, chunk_id, node_type, embedding)
-                    VALUES (?, ?, ?, ?)
-                """, (node_id, chunk_id, node_type, emb_blob))
-            conn.commit()
+        if self.is_postgres:
+            with self.conn.cursor() as cursor:
+                cursor.execute("DELETE FROM embeddings WHERE node_id = %s", (node_id,))
+                
+                for chunk_id, emb in enumerate(embeddings):
+                    cursor.execute("""
+                        INSERT INTO embeddings (node_id, chunk_id, node_type, embedding)
+                        VALUES (%s, %s, %s, %s)
+                    """, (node_id, chunk_id, node_type, emb))
+            self.conn.commit()
+        else:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM embeddings WHERE node_id = ?", (node_id,))
+                
+                for chunk_id, emb in enumerate(embeddings):
+                    emb_blob = emb.astype(np.float32).tobytes()
+                    cursor.execute("""
+                        INSERT INTO embeddings (node_id, chunk_id, node_type, embedding)
+                        VALUES (?, ?, ?, ?)
+                    """, (node_id, chunk_id, node_type, emb_blob))
+                conn.commit()
 
     def upsert_embeddings(self, items: List[Tuple[str, str, List[np.ndarray]]]) -> None:
         """
@@ -86,25 +130,45 @@ class VectorStore:
         if not items:
             return
             
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            node_ids = list({item[0] for item in items})
-            for i in range(0, len(node_ids), 900):
-                batch_ids = node_ids[i:i+900]
-                placeholders = ",".join(["?"] * len(batch_ids))
-                cursor.execute(f"DELETE FROM embeddings WHERE node_id IN ({placeholders})", tuple(batch_ids))
-            
-            data = []
-            for node_id, node_type, embeddings in items:
-                for chunk_id, emb in enumerate(embeddings):
-                    data.append((node_id, chunk_id, node_type, emb.astype(np.float32).tobytes()))
-            
-            cursor.executemany("""
-                INSERT INTO embeddings (node_id, chunk_id, node_type, embedding)
-                VALUES (?, ?, ?, ?)
-            """, data)
-            conn.commit()
+        if self.is_postgres:
+            with self.conn.cursor() as cursor:
+                node_ids = list({item[0] for item in items})
+                for i in range(0, len(node_ids), 900):
+                    batch_ids = node_ids[i:i+900]
+                    placeholders = ",".join(["%s"] * len(batch_ids))
+                    cursor.execute(f"DELETE FROM embeddings WHERE node_id IN ({placeholders})", tuple(batch_ids))
+                
+                from psycopg2.extras import execute_batch
+                data = []
+                for node_id, node_type, embeddings in items:
+                    for chunk_id, emb in enumerate(embeddings):
+                        data.append((node_id, chunk_id, node_type, emb))
+                
+                execute_batch(cursor, """
+                    INSERT INTO embeddings (node_id, chunk_id, node_type, embedding)
+                    VALUES (%s, %s, %s, %s)
+                """, data)
+            self.conn.commit()
+        else:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                node_ids = list({item[0] for item in items})
+                for i in range(0, len(node_ids), 900):
+                    batch_ids = node_ids[i:i+900]
+                    placeholders = ",".join(["?"] * len(batch_ids))
+                    cursor.execute(f"DELETE FROM embeddings WHERE node_id IN ({placeholders})", tuple(batch_ids))
+                
+                data = []
+                for node_id, node_type, embeddings in items:
+                    for chunk_id, emb in enumerate(embeddings):
+                        data.append((node_id, chunk_id, node_type, emb.astype(np.float32).tobytes()))
+                
+                cursor.executemany("""
+                    INSERT INTO embeddings (node_id, chunk_id, node_type, embedding)
+                    VALUES (?, ?, ?, ?)
+                """, data)
+                conn.commit()
 
     def search(self, query_embedding: np.ndarray, top_k: int = 5, node_types: Optional[List[str]] = None) -> List[Tuple[str, str, float]]:
         """
@@ -125,33 +189,66 @@ class VectorStore:
         if norm_q == 0:
             return []
             
-        results = {}
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            if node_types:
-                placeholders = ",".join("?" * len(node_types))
-                cursor.execute(f"SELECT node_id, node_type, embedding FROM embeddings WHERE node_type IN ({placeholders})", tuple(node_types))
-            else:
-                cursor.execute("SELECT node_id, node_type, embedding FROM embeddings")
-                
-            for row in cursor:
-                node_id, node_type, emb_blob = row
-                emb = np.frombuffer(emb_blob, dtype=np.float32)
-                norm_emb = np.linalg.norm(emb)
-                
-                if norm_emb == 0:
-                    continue
+        if self.is_postgres:
+            with self.conn.cursor() as cursor:
+                # pgvector natively supports cosine distance operator `<=>` (returns distance not similarity, so score is 1 - dist)
+                if node_types:
+                    placeholders = ",".join(["%s"] * len(node_types))
+                    sql = f"""
+                        SELECT node_id, node_type, 1 - (embedding <=> %s::vector) AS similarity
+                        FROM embeddings
+                        WHERE node_type IN ({placeholders})
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                    """
+                    params = (query_emb.tolist(), *node_types, query_emb.tolist(), top_k)
+                    cursor.execute(sql, params)
+                else:
+                    sql = """
+                        SELECT node_id, node_type, 1 - (embedding <=> %s::vector) AS similarity
+                        FROM embeddings
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                    """
+                    params = (query_emb.tolist(), query_emb.tolist(), top_k)
+                    cursor.execute(sql, params)
                     
-                sim = float(np.dot(query_emb, emb) / (norm_q * norm_emb))
+                results = {}
+                for row in cursor:
+                    node_id, node_type, sim = row
+                    if node_id not in results or sim > results[node_id][1]:
+                        results[node_id] = (node_type, sim)
                 
-                if node_id not in results or sim > results[node_id][1]:
-                    results[node_id] = (node_type, sim)
+                sorted_results = [(nid, ntype, sim) for nid, (ntype, sim) in results.items()]
+                sorted_results.sort(key=lambda x: x[2], reverse=True)
+                return sorted_results[:top_k]
+        else:
+            results = {}
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
                 
-        sorted_results = [(nid, ntype, sim) for nid, (ntype, sim) in results.items()]
-        sorted_results.sort(key=lambda x: x[2], reverse=True)
-        return sorted_results[:top_k]
+                if node_types:
+                    placeholders = ",".join("?" * len(node_types))
+                    cursor.execute(f"SELECT node_id, node_type, embedding FROM embeddings WHERE node_type IN ({placeholders})", tuple(node_types))
+                else:
+                    cursor.execute("SELECT node_id, node_type, embedding FROM embeddings")
+                    
+                for row in cursor:
+                    node_id, node_type, emb_blob = row
+                    emb = np.frombuffer(emb_blob, dtype=np.float32)
+                    norm_emb = np.linalg.norm(emb)
+                    
+                    if norm_emb == 0:
+                        continue
+                        
+                    sim = float(np.dot(query_emb, emb) / (norm_q * norm_emb))
+                    
+                    if node_id not in results or sim > results[node_id][1]:
+                        results[node_id] = (node_type, sim)
+                    
+            sorted_results = [(nid, ntype, sim) for nid, (ntype, sim) in results.items()]
+            sorted_results.sort(key=lambda x: x[2], reverse=True)
+            return sorted_results[:top_k]
 
     def build_from_graph(self, graph_path: str, embedder, progress_callback=None) -> int:
         """
@@ -167,13 +264,22 @@ class VectorStore:
         """
         nodes_to_embed = []
         
-        with sqlite3.connect(graph_path) as conn:
-            cursor = conn.cursor()
-            self._extract_symbols(cursor, nodes_to_embed)
-            self._extract_latest_function_versions(cursor, nodes_to_embed)
-            self._extract_commits_and_symbols(cursor, nodes_to_embed)
-            self._extract_pull_requests(cursor, nodes_to_embed)
-            self._extract_clickup_tasks(cursor, nodes_to_embed)
+        if self.is_postgres:
+            graph_conn = psycopg2.connect(self.db_url)
+        else:
+            graph_conn = sqlite3.connect(graph_path)
+            
+        try:
+            with graph_conn:
+                cursor = graph_conn.cursor()
+                self._extract_symbols(cursor, nodes_to_embed)
+                self._extract_latest_function_versions(cursor, nodes_to_embed)
+                self._extract_commits_and_symbols(cursor, nodes_to_embed)
+                self._extract_pull_requests(cursor, nodes_to_embed)
+                self._extract_clickup_tasks(cursor, nodes_to_embed)
+        finally:
+            if not getattr(graph_conn, 'closed', False):
+                graph_conn.close()
 
         return self._batch_embed_and_store(nodes_to_embed, embedder, progress_callback)
 
@@ -185,7 +291,7 @@ class VectorStore:
             cursor (sqlite3.Cursor): The graph database cursor.
             nodes_to_embed (list): The list to append extraction results to.
         """
-        cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.SYMBOL.value,))
+        cursor.execute(f"SELECT id, attributes FROM nodes WHERE type = {self.ph}", (NodeType.SYMBOL.value,))
         for node_id, attr_json in cursor.fetchall():
             try:
                 attrs = json.loads(attr_json)
@@ -203,16 +309,16 @@ class VectorStore:
             cursor (sqlite3.Cursor): The graph database cursor.
             nodes_to_embed (list): The list to append extraction results to.
         """
-        cursor.execute("SELECT id FROM nodes WHERE type = ?", (NodeType.FUNCTION.value,))
+        cursor.execute(f"SELECT id FROM nodes WHERE type = {self.ph}", (NodeType.FUNCTION.value,))
         function_ids = [r[0] for r in cursor.fetchall()]
         
         for f_id in function_ids:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT v.id, v.attributes
                 FROM edges h_edge
                 JOIN edges v_edge ON h_edge.target_id = v_edge.source_id
                 JOIN nodes v ON v_edge.target_id = v.id
-                WHERE h_edge.source_id = ? 
+                WHERE h_edge.source_id = {self.ph} 
                   AND h_edge.type = 'HAS_HISTORY' 
                   AND v_edge.type = 'HAS_VERSION'
             """, (f_id,))
@@ -224,7 +330,7 @@ class VectorStore:
             v_ids = [v[0] for v in versions]
             v_map = {v[0]: v[1] for v in versions}
             
-            placeholders = ",".join("?" * len(v_ids))
+            placeholders = ",".join(self.ph for _ in v_ids)
             cursor.execute(f"SELECT source_id FROM edges WHERE type='PREVIOUS_VERSION' AND source_id IN ({placeholders})", tuple(v_ids))
             has_next = {r[0] for r in cursor.fetchall()}
             
@@ -248,7 +354,7 @@ class VectorStore:
             cursor (sqlite3.Cursor): The graph database cursor.
             nodes_to_embed (list): The list to append extraction results to.
         """
-        cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.COMMIT.value,))
+        cursor.execute(f"SELECT id, attributes FROM nodes WHERE type = {self.ph}", (NodeType.COMMIT.value,))
         for c_id, attr_json in cursor.fetchall():
             try:
                 attrs = json.loads(attr_json)
@@ -258,10 +364,10 @@ class VectorStore:
             except Exception:
                 pass
             
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT n.attributes FROM edges e
                 JOIN nodes n ON e.target_id = n.id
-                WHERE e.source_id = ? AND e.type = ? AND n.type = ?
+                WHERE e.source_id = {self.ph} AND e.type = {self.ph} AND n.type = {self.ph}
             """, (c_id, EdgeType.MODIFIED_SYMBOL.value, NodeType.SYMBOL.value))
             
             commit_symbols = []
@@ -282,7 +388,7 @@ class VectorStore:
         """
         Extract Pull Request titles and descriptions for semantic indexing.
         """
-        cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.PULL_REQUEST.value,))
+        cursor.execute(f"SELECT id, attributes FROM nodes WHERE type = {self.ph}", (NodeType.PULL_REQUEST.value,))
         for pr_id, attr_json in cursor.fetchall():
             try:
                 attrs = json.loads(attr_json)
@@ -298,7 +404,7 @@ class VectorStore:
         """
         Extract ClickUp task titles and descriptions for semantic indexing.
         """
-        cursor.execute("SELECT id, attributes FROM nodes WHERE type = ?", (NodeType.CLICKUP_TASK.value,))
+        cursor.execute(f"SELECT id, attributes FROM nodes WHERE type = {self.ph}", (NodeType.CLICKUP_TASK.value,))
         for task_id, attr_json in cursor.fetchall():
             try:
                 attrs = json.loads(attr_json)
@@ -356,5 +462,7 @@ class VectorStore:
         Returns:
             None
         """
-        pass
+        if hasattr(self, 'conn') and self.conn and self.is_postgres:
+            if not getattr(self.conn, 'closed', False):
+                self.conn.close()
 
